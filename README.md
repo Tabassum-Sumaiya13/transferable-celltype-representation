@@ -1,391 +1,191 @@
-# Cross-cohort cell-type annotation — how to run it
-
-This file is the **operating manual**: how to run the pipeline, how to add a new dataset,
-and how to unfreeze the held-out cohort and train on it.
 
-It does **not** repeat the science. Results, decisions and open questions live in
-[files/](files/) — start at [CLAUDE.md](CLAUDE.md) for the index.
-
----
-
-## 1. What the pipeline does
+# Cross-Cohort Spatial Proteomics Cell-Type Annotation
 
-Takes several spatial-proteomics cohorts (different hospitals, machines and antibody panels),
-puts them on one scale, learns a **shared label space** from marker profiles instead of a
-hand-written ontology, and trains one model that labels cells in a cohort it has never seen.
+## 1. Research question
 
-All the code is in [pipeline2/](pipeline2/). The old pipeline is only in git history
-(`git show HEAD:pipeline/`) and must not be built on.
+The project tests whether a model can learn cell-type representations that remain biologically meaningful when the data change across:
 
----
+- cohort and patient population;
+- tissue and disease;
+- acquisition platform;
+- antibody panel and missing markers;
+- raw-value scale and preprocessing;
+- native label names and label granularity.
 
-## 2. Setup
+The strongest test is not random cell-level cross-validation. Cells from the same slide are technically related, so a random split can make the task look easier than it is. The main evaluation is therefore leave-one-cohort-out (LOCO): one complete cohort is hidden, the model is trained on the remaining cohorts, and the hidden cohort is scored only after training and model-selection decisions are complete.
 
-```
-python 3.12
-pip install torch pandas numpy pyarrow matplotlib scipy networkx requests
-```
+## 2. Cohort design
 
-| Package | Needed for |
-|---|---|
-| `requests` | Stage 0b only, and only the **first** run (HGNC/UniProt lookups get cached) |
-| `networkx` | Stage 1b nesting graph |
-| `scipy` | clustering, Hungarian matching, rank stats |
-| `torch` | Stages 1, 2, 3, 6, 7 (CPU is fine; GPU is much faster) |
-| `pyarrow` | parquet read/write |
+The registry in `celltype_transfer/config.py` describes each cohort declaratively. The current roster contains CRC and UPMC CODEX data, Keren MIBI-TOF data, Ferguson IMC data, Phillips CODEX data, Danenberg IMC data, and Sorin IMC data. Each specification records the tissue, disease, platform, pixel size, value scale, source tables, marker columns, coordinates, patient identifiers, and native labels.
 
-Optional: `sentence-transformers` (naming only, weight α = 0 — the pipeline is correct without it).
-Not needed: `torch_geometric`, `leidenalg`.
+The loader converts every source into one standard table:
 
-**Folder layout** (all paths are derived from where `pipeline2/config.py` sits, so you can run
-commands from anywhere):
+`cell_id, cohort, image_id, patient_id, x_px, y_px, area_px2, native_label, label_confidence`
 
-```
-Datasets/          source data, one folder per cohort      (git-ignored, not in the repo)
-work/              everything the pipeline produces        (git-ignored)
-  raw/             one standard table per cohort
-  values/          Stage 1 + Stage 2 value tables
-  ckpt/            model checkpoints
-  panel.json       THE token vocabulary — see the warning in §6
-  label_map.csv    THE label space
-  prototypes.npy   one marker signature per cluster
-reports/           every gate report, as markdown + figures
-pipeline2/panel/   gate thresholds, committed BEFORE each run
-files/             the project history and decision log
-```
-
-`Datasets/`, `work/` and `_validation/` are git-ignored, so a fresh clone has code only.
-You must download the data and re-run from Stage 0.
-
----
-
-## 3. The pipeline, stage by stage
-
-Run from the repo root. Every stage writes a markdown report into `reports/`.
-
-| # | Command | Reads | Writes | Time |
-|---|---|---|---|---|
-| load | `python pipeline2/loaders.py` | `Datasets/` | `work/raw/{cohort}.parquet` | minutes, CPU |
-| 0 | `python pipeline2/s0_audit.py` | `work/raw/` | `reports/s0_audit.md` | minutes, CPU |
-| 0b | `python pipeline2/s0b_markers.py` | `work/raw/` | `work/marker_registry.csv` | minutes, CPU (first run needs internet) |
-| 1 | `python pipeline2/s1_values.py --bakeoff` | `work/raw/` | `work/values/{cohort}.parquet` | slow on CPU — the bake-off trains 6 arms |
-| 1b | `python pipeline2/s1b_labels.py` | `work/values/` | `work/label_map.csv`, `work/prototypes.npy` | minutes, CPU |
-| 2 | `python pipeline2/s2_tokens.py --build` | `work/values/` | `work/values/{cohort}_full.parquet`, **`work/panel.json`** | minutes, CPU |
-| conf | `python pipeline2/s6_confidence.py` | `work/raw/` | `work/label_conf/` | seconds, CPU |
-| 2 gate | `python pipeline2/s2_tokens.py --check` | above | `reports/s2_masking.md` | hours — use a GPU |
-| 3 | `python pipeline2/s3_encoder.py --lambda-sweep` | above | `work/ckpt/s3_*.pt` | **39.8 min** on a T4 (measured) |
-| 6 | `python pipeline2/s6_train.py --ablate-losses` | above | `work/ckpt/s6_sweep.pt` | **73.5 min** on a T4 (measured) |
-| 7a | `python pipeline2/s7_spaces.py --build` | `work/s1b_signatures.npz` | `work/label_map_B1.csv`, `_B2.csv` + prototypes | minutes, CPU |
-| 7a | `python pipeline2/s7_eval.py --frozen-test ferguson` | above | `work/ckpt/s7_*.pt`, `reports/s7_eval.md` | **20.0 min** on a T4 (measured) |
-| 7b | `python pipeline2/s7b_abstain.py` | `work/ckpt/s7_*.pt` | `reports/s7b_abstain.md` | minutes, CPU — no training |
-| 8 | `python pipeline2/s8_perclass.py` | existing checkpoints | `reports/s8_perclass.md` | no compute at all |
-| 8 | `python pipeline2/s8_seeds.py --loco --frozen` | above | `reports/s8_seeds.md` | ~4 h on a T4 (estimated, 55 fits) |
-
-Only the times marked **measured** were timed on a real run (they are recorded in
-[files/09](files/09_status_deps_and_commands.md)). The CPU stages have never been timed —
-treat those as rough.
-
-Useful flags, most stages accept them:
-
-- `--quick` — tiny smoke run. Proves the code path, **scores nothing**. Always do this first.
-- `--refit` — ignore the checkpoint cache and retrain.
-- `--cpu` — force CPU even if a GPU exists.
-- `--report` — re-render the report from cached checkpoints (Stage 7, Stage 8).
-
-Two flag notes, because the older docs are out of date:
-
-- `s0_audit.py --all` does nothing. The real flag is `--build`, which runs the loaders first.
-- `s7_eval.py --frozen-test ferguson` — the cohort name is **decorative**. The held-out cohort
-  is hard-coded in [s1b_control.py:41-42](pipeline2/s1b_control.py#L41-L42).
-
-### Running the heavy stages on a GPU
-
-Stages 2-gate, 3, 6, 7 and 8 are slow on a laptop. They run on Kaggle from the same code:
-
-```
-python pipeline2/kaggle/make_upload.py     # builds work/kaggle_upload/ (~94 MB) + MANIFEST.json
-```
-
-Upload that folder as a **private** Kaggle Dataset, then import the matching notebook from
-[pipeline2/kaggle/](pipeline2/kaggle/). Full instructions: [pipeline2/kaggle/README.md](pipeline2/kaggle/README.md).
-
----
-
-## 4. Adding a new dataset
-
-### 4.1 What the dataset must have
-
-| Needed | Notes |
-|---|---|
-| one row per cell | with an image/slide id, `x`, `y`, and a native cell-type label |
-| a marker matrix | one column per antibody, under the **original vendor name** — do not rename them, Stage 0b resolves names against HGNC/UniProt |
-| pixel size in µm | reporting only today (Stage 4 is deferred), but record where the number came from |
-
-Optional but useful: patient id, cell area, per-cell label confidence.
-If a patient id is missing the loader fills `unknown`; if confidence is missing it fills `1.0`.
-
-The arrival scale (raw / arcsinh / z-score / uint8) does **not** matter — Stage 1's per-cohort
-ECDF removes it. Just record it honestly in the spec.
-
-### 4.2 Write the spec — this is the only code you write
-
-Everything cohort-specific lives in `SPECS` in [pipeline2/config.py](pipeline2/config.py).
-`loaders.py` is one generic reader with **no** `if cohort == "X"` anywhere. If a new dataset
-needs a code change in `loaders.py`, extend the spec format — do not add a branch.
-
-```python
-'MyCohort': dict(
-    tech='IMC', tissue='liver', disease='hepatocellular carcinoma',
-    role='train',                       # 'train' or 'holdout'
-    px_um=1.0,
-    px_um_source='hardware fact - IMC ablation spot is 1 um',
-    arrival='raw',                      # raw | arcsinh | zscore | raw-uint8
-    citation='Author et al., Journal 2024, doi:...',
-    base=dict(
-        file='MyCohort/cells.csv', format='csv',      # relative to Datasets/
-        cols={'image_id': 'ImageID', 'patient_id': 'PatientID',
-              'x_px': 'X', 'y_px': 'Y', 'native_label': 'CellType'},
-        area=dict(kind='column', column='Area'),      # or kind='divide', numerator=, denominator=
-        keep=['CellID'],                              # extra columns needed as join keys
-    ),
-    joins=[],                                          # extra tables merged by key
-    expr=dict(markers=dict(kind='range', start='CD3', end='DNA1')),
-),
-```
-
-Marker columns are declared by **rule**, never hand-listed:
-
-| Rule | Use when |
-|---|---|
-| `{'kind': 'pattern', 'regex': r':Cyc_\d+_ch_\d+$'}` | marker names share a suffix/prefix |
-| `{'kind': 'range', 'start': 'CD3', 'end': 'DNA1'}` | markers sit in one contiguous block |
-| `{'kind': 'exclude', 'cols': ['SampleID', 'cellLabel']}` | the file is markers plus a few key columns |
-| `{'kind': 'file', 'path': 'MyCohort/panel.csv', 'column': 'marker'}` | a panel list ships with the data. Add `'header': None` for a bare one-name-per-line file, or the first marker is silently eaten |
-
-If the marker matrix is a separate file, add `file`, `format`, `left_on`, `right_on` to `expr`
-and the loader merges it. A join that duplicates rows raises immediately — it does not
-silently multiply your cells.
-
-### 4.3 Back up `work/` first
-
-Adding a cohort rewrites shared artefacts. Before you start:
-
-```
-xcopy /E /I work work_backup            # PowerShell / cmd
-cp -r work work_backup                  # bash
-```
+Stage 0 keeps all cells and columns. It does not silently remove unusual labels, stains, or channels. It audits missing values, marker counts, label counts, slide sizes, and coordinate plots. A dataset is rejected only for a documented structural reason, such as the absence of recoverable cell coordinates.
 
-At minimum keep copies of `work/panel.json`, `work/label_map.csv`, `work/prototypes.npy`
-and `work/ckpt/`.
+This separation matters. Data ingestion should not decide that a label is biologically invalid before the marker evidence has been examined.
 
-### 4.4 Run it
+## 3. Marker and panel harmonization
 
-```
-python pipeline2/loaders.py MyCohort            # just the new one
-python pipeline2/s0_audit.py                    # sanity: cells, images, coordinates
-python pipeline2/s0b_markers.py                 # resolve its marker names (needs internet once)
-python pipeline2/s1_values.py                   # builds only the missing value table
-python pipeline2/s1b_labels.py --resign         # MUST use --resign: the signature cache is stale
-python pipeline2/s2_tokens.py --build
-python pipeline2/s6_confidence.py
-```
+Different studies use different names for the same protein, duplicate reagents, different epitopes, and non-protein channels such as DNA stains. Stage 0b resolves marker names through HGNC and UniProt into a canonical triple:
 
-Then check §4.5 before training anything.
+`gene_or_complex | epitope | modification`
 
-Three things to read before you trust the output:
+The triple, rather than the raw column name, identifies a marker. This keeps biologically different markers such as CD45, CD45RA, and CD45RO separate while allowing equivalent names to match. Duplicate reagents that resolve to the same triple are combined according to the panel policy. Non-protein channels are excluded from the biological marker vocabulary.
 
-- **`--resign` is not optional.** Signatures are cached in `work/s1b_signatures.npz`.
-  Without it, Stage 1b clusters the old cohorts and quietly ignores the new one.
-- **`--build` on Stage 2 is not optional either.** Run bare, `s2_tokens.py` notices the one
-  missing table, builds only that cohort — and then overwrites `work/s2_dynrange.csv` with that
-  cohort's rows alone. Stage 6 reads that file to decide which (cohort, marker) pairs to exclude,
-  so it would silently train on the wrong exclusion set. `--build` rebuilds every table and every
-  row. It is slower and it is the only safe option.
-- `s0b_markers.py` puts anything it cannot resolve into a **review queue** and never guesses.
-  Read that section of `reports/s0b_markers.md`. Fix real misses in
-  [pipeline2/panel/manual_overrides.csv](pipeline2/panel/manual_overrides.csv), and add genuinely
-  non-gene channels (dyes, elemental channels, protein complexes) to
-  [pipeline2/panel/complexes.csv](pipeline2/panel/complexes.csv).
-
-### 4.5 The vocabulary trap — check this every time
-
-`work/panel.json` holds the **token vocabulary**: every resolved marker triple, and its index.
-Model weights, and `work/prototypes.npy`, are indexed by that position. This already broke
-one run silently (D-39).
-
-After `s2_tokens.py --build`, compare `n_vocab` with the backup:
-
-```
-python -c "import json; print(json.load(open('work/panel.json'))['n_vocab'])"
-```
-
-| Result | Meaning | What you must do |
-|---|---|---|
-| **unchanged** (99) | every new marker was already in the vocabulary | existing checkpoints stay valid |
-| **changed** | the new cohort added markers | every Stage 2/3/6/7 checkpoint is now misaligned — delete `work/ckpt/s2_*.pt`, `s3_*`, `s6_*`, `s7_*` and refit from Stage 2 |
-
-The same applies to the label space: re-running `s1b_labels.py` rewrites `work/label_map.csv`
-and `work/prototypes.npy`. If the number of clusters changes, `prototypes.npy` no longer matches
-and Stage 6 falls back to **random** prototype initialisation — it prints a line saying so.
-Watch for it.
-
-### 4.6 Which of the two roles do you want?
-
-**As a training cohort** (`role='train'`) — it joins the roster and every LOCO number is
-re-measured. Run §4.4, then Stage 2 gate → 3 → 6 → 7 with `--refit`.
-
-**As a new test cohort** (`role='holdout'`) — it is scored zero-shot. Also edit
-[s1b_control.py:41-42](pipeline2/s1b_control.py#L41-L42):
-
-```python
-TRAIN  = ['CRC', 'UPMC', 'Keren', 'Phillips', 'Sorin', 'ferguson']   # everything you train on
-FROZEN = 'MyCohort'                                                   # the cohort under test
-```
-
-Then:
-
-```
-python pipeline2/s7_spaces.py --build        # clusters TRAIN alone, then places MyCohort's
-                                             # labels into that FROZEN partition by signature
-python pipeline2/s7_eval.py --frozen-test MyCohort
-```
-
-`s7_spaces.py` is the mechanism for "a cohort that arrives later": its labels join the cluster
-whose members are closest on average, and only if that distance is inside the same cut the
-partition was built at. A label no cluster admits is reported as **NOVEL**, never forced into
-the nearest bin.
-
-### 4.7 Limitation: the new dataset needs labels
-
-There is **no predict-only entry point today**. Every scoring path maps `native_label` through
-`label_map.csv` and drops cells it cannot map, so a dataset with no ground-truth labels runs
-through Stage 2 and then stops.
-
-Annotating a truly unlabelled cohort needs a small new script that:
-
-1. builds `{cohort}_full.parquet` (Stages 0 → 2, which need no labels),
-2. loads `work/ckpt/s7_A.pt` and the vocabulary from `work/panel.json`,
-3. runs the encoder over the cells, takes the nearest prototype,
-4. maps the cluster index back to a name through `label_map.csv`,
-5. optionally applies the Stage 7b abstain rule — distance to the nearest prototype, which
-   lifted macro-F1 from 0.3309 to 0.4204 at 35% coverage.
-
-Ask if you want this built; it is roughly 60 lines and reuses `s7_eval.load_frozen`.
-
----
-
-## 5. Unfreezing and training
-
-### 5.1 First: what is actually frozen
-
-Two different meanings, and only one is about model weights.
-
-| "Frozen" | What it really is |
-|---|---|
-| **The frozen holdout** (`ferguson`) | A whole cohort kept out of every loss so Stage 7's zero-shot number is honest. This is the one people mean. |
-| **The frozen partition** (spaces B1/B2) | The label clusters are built from training cohorts alone, then locked, and the holdout's labels are placed into them. The holdout can never move a cluster boundary. |
-| **Model weights** | **Nothing is frozen.** There is no `requires_grad = False` anywhere in the codebase. The encoder trains end to end in Stages 2, 3, 6 and 7. |
-
-What people sometimes mistake for a frozen encoder is the **warm start**: Stage 6 and 7 load
-Stage 2's pretrained token layer from `work/ckpt/s2_armB.pt` as a *starting point*, then train
-all of it. Turn it off with `--no-warm` to train from cold.
-
-### 5.2 Unfreeze the holdout and train on it
-
-Do this when you want `ferguson` (or whichever cohort is frozen) to become an ordinary training
-cohort. **You give up the zero-shot claim about that cohort permanently** — you cannot un-see it.
-
-1. [pipeline2/config.py](pipeline2/config.py#L121) — change the ferguson spec:
-   ```python
-   role='train',        # was 'holdout'
-   ```
-2. [pipeline2/s1b_control.py:41-42](pipeline2/s1b_control.py#L41-L42) — these two lists are
-   hard-coded and drive Stages 7 and 8:
-   ```python
-   TRAIN  = ['CRC', 'UPMC', 'Keren', 'Phillips', 'Sorin', 'ferguson']
-   FROZEN = 'NewHoldout'      # Stage 7 needs a held-out cohort. With none, skip Stages 7/7b/8.
-   ```
-3. Clear the artefacts that were built without it:
-   ```
-   del work\ckpt\s3_*.pt work\ckpt\s6_*.pt work\ckpt\s7_*.pt
-   del work\label_map_B1.csv work\label_map_B2.csv work\prototypes_B1.npy work\prototypes_B2.npy
-   ```
-4. Rebuild and retrain:
-   ```
-   python pipeline2/s1b_labels.py --resign
-   python pipeline2/s2_tokens.py --build
-   python pipeline2/s6_confidence.py
-   python pipeline2/s6_train.py --ablate-losses --quick     # smoke test first
-   python pipeline2/s6_train.py --ablate-losses --refit     # the real run
-   ```
-5. Then Stage 7 only if you set a new `FROZEN`.
-
-**Side effects, all of them real:**
-
-- Every number in `reports/` was measured with ferguson out. After this they are stale — do not
-  quote old and new numbers side by side.
-- The LOCO folds change from 5 to 6, so Gate 6's 0.3901 is not comparable to whatever comes out.
-- ferguson's 34 markers may add triples to the vocabulary. Re-check §4.5.
-- The support law predicts the win: ferguson adds a 6th independent vote on the types it shares,
-  which is exactly the "add cohorts that overlap on the types you care about" lever.
-- This is a design change. Log it in
-  [files/08_decision_log_and_do_not_repeat.md](files/08_decision_log_and_do_not_repeat.md)
-  with the next D-number, and update the status line in [CLAUDE.md](CLAUDE.md).
-
-### 5.3 Training knobs
-
-All in [pipeline2/s6_train.py:60-73](pipeline2/s6_train.py#L60-L73), declared as constants:
-
-| Constant | Value | What it does |
-|---|---|---|
-| `EPOCHS`, `PATIENCE` | 30, 4 | ceiling and early stopping |
-| `N_TRAIN` | 15,000 | training cells drawn per cohort |
-| `BATCH`, `LR` | 512, 1e-3 | |
-| `D_TOK`, `D_Z` | 64, 128 | token and cell embedding size |
-| `BLOCKS`, `HEADS` | 2, 4 | set-transformer depth |
-| `MASK_FRAC` | 0.15 | markers hidden per cell for the reconstruction loss |
-| `PROTO_TEMP` | 0.1 | prototype softmax temperature |
-
-**The highest-value knob right now is `EPOCHS`.** All three Gate 7 runs hit the 30-epoch ceiling,
-so **0.3309 is a lower bound**, not a converged number. Raising it is the obvious next
-experiment — and it changes a declared constant, so it belongs in the decision log.
-
-Stage 2 has its own ceiling: `EPOCHS = 30` plus `--holdout-epochs N` to raise it for the two
-holdout arms only (Arm B needed 47, so 30 was binding there too).
-
-To train from scratch instead of warm-starting: add `--no-warm`.
-To ignore cached checkpoints: add `--refit`. Without it, a finished fit is reloaded, which is
-what makes a Kaggle session timeout survivable — a re-run picks up where it stopped.
-
-Reproducibility: one `SEED = 20260810` in [config.py:36](pipeline2/config.py#L36), and every
-random draw derives its own generator from it plus a purpose string. CPU and GPU will not match
-bit for bit — the seed makes each machine reproducible against itself.
-
----
-
-## 6. Common errors
-
-| Message | Cause | Fix |
-|---|---|---|
-| `nothing built - run: python loaders.py` | no `work/raw/*.parquet` | run the loaders |
-| `work/panel.json missing` | Stage 2 never built | `python pipeline2/s2_tokens.py --build` |
-| `marker file lists columns absent from the data` | the panel list does not match the expression table | check the spec's `expr.markers` rule, and `header: None` for bare lists |
-| `marker range endpoint not found` | a `range` rule's `start`/`end` column was renamed | open the file's header and fix the endpoints |
-| `join on [...] duplicated rows` | the joined table's key is not unique | de-duplicate the right-hand table first |
-| `prototypes.npy is (25, 99), expected (31, 99) - random init instead` | the label space changed but prototypes did not | re-run `s1b_labels.py --resign`, then refit Stage 6 |
-| `--offline but <url> is not cached` | Stage 0b hit a new marker with no internet | run once online to fill `work/api_cache.json` |
-| `work/s2_dynrange.csv predates D-28` | old artefact | `python pipeline2/s2_tokens.py --build` |
-| Stage 3/6/7 numbers look wrong on Kaggle | stale uploaded dataset | re-run `make_upload.py` and re-upload; the notebooks assert on `MANIFEST.json` |
-
----
-
-## 7. House rules for anyone running this
-
-1. **Gate thresholds are committed before the run**, in `pipeline2/panel/gate*_expect.csv`.
-   Never move a threshold to make a gate pass. Two gates in this project are recorded as
-   FAIL for exactly that reason.
-2. **A `--quick` smoke test costs 1-2 minutes and has caught real breakages twice.** Run it.
-3. **Report macro-F1 twice** — all clusters, and learnable-only. See point 4 of [CLAUDE.md](CLAUDE.md).
-4. **Update the docs before you finish.** New decision → `files/08`. Status change → `files/09`
-   plus the header in `CLAUDE.md`. Never delete an old entry; mark it
-   Accepted / Replaced / Deprecated / Rejected and say what replaced it.
+The result is a frozen vocabulary in `work/panel.json`. Every marker has one stable index. A cohort that does not measure a marker does not receive a biological zero; it receives an explicit absent-marker state. A later cohort can use only the vocabulary that was frozen during model development. New markers are reported as dropped rather than silently changing the meaning or shape of an existing checkpoint.
+
+## 4. Continuous value normalization
+
+The source datasets arrive on incompatible scales: raw fluorescence, arcsinh values, z-scores, and quantized uint8 values. Comparing these values directly would make technical scale differences look like biology.
+
+For each cohort and marker, the pipeline computes a mid-rank empirical cumulative distribution function (ECDF):
+
+$$
+u_{c,m}(x_i) = \frac{\operatorname{rank}(x_i)}{n_c}
+$$
+
+where $c$ is the cohort, $m$ is the marker, and ties receive their average rank. This is a monotone, bin-free transform. It preserves the ordering of cells within a cohort while putting markers from different technical scales onto a comparable $[0,1]$ scale.
+
+The normalization decision is selected by a predeclared bake-off. The tested alternatives include image-level ECDF, cohort-level ECDF, learned slide correction, and combinations of image and cohort ranks. The winning representation is the one that gives the best cross-cohort masked-marker reconstruction without using cell-type labels from the held-out cohort.
+
+Image-level normalization is treated carefully. If a slide is dominated by tumour cells, ranking inside that slide can create an artificial median and distort prevalence. Therefore the cohort-level rank is retained as the main representation, while image statistics are tested as an additional signal rather than assumed to be harmless.
+
+## 5. Self-supervised panel-aware representation learning
+
+After normalization, a cell is represented as a set of marker tokens rather than as a fixed-width vector whose missing entries look like negative expression.
+
+Each measured marker token contains:
+
+1. the normalized marker value;
+2. a learned marker-identity embedding;
+3. an explicit absent-marker embedding for vocabulary slots not measured by the cohort.
+
+The token sequence is processed by a small Transformer-style set encoder. Attention lets the model use marker combinations, not only independent marker thresholds. Mean pooling produces a 128-dimensional cell embedding, $z_{cell}$.
+
+Before supervised cell-type training, the token encoder is pretrained with masked-marker reconstruction. A fraction of eligible marker values is hidden, and the model predicts the hidden values from the remaining marker set. The objective is label-free, so all cohorts can contribute before their native labels have been aligned:
+
+$$
+\mathcal{L}_{mask} = \frac{1}{|\mathcal{H}|}\sum_{m \in \mathcal{H}} \left(\hat{u}_m-u_m\right)^2
+$$
+
+where $\mathcal{H}$ is the set of hidden, measurable, non-degenerate markers. Markers with insufficient rank variation are excluded from this loss because their reconstruction denominator is effectively zero and would create unstable, uninformative gradients.
+
+This stage answers a useful intermediate question: does the representation transfer marker relationships across panels before any shared cell-type label is imposed?
+
+## 6. Automatic shared label space
+
+Native labels cannot be compared by spelling. The same name can mean different biology in different cohorts, while different names can describe the same type. Stage 1b therefore builds a shared label space from marker signatures rather than text.
+
+For every `(cohort, native_label)` pair, it computes:
+
+- marker quantiles on the cohort-level ECDF scale;
+- mean marker ranks;
+- label prevalence and cell count;
+- within-label marker co-expression;
+- the marker evidence available in that cohort.
+
+Cross-cohort comparison uses within-cohort, between-label scaling. This prevents a cohort's cell composition from becoming a false cohort fingerprint. A symmetric distance is used to decide whether labels should merge. A separate directed containment relation represents broad parent types and narrower subtypes. Cycles are contracted into strongly connected components before the nesting graph is used.
+
+Granularity is selected per branch. A proposed split is retained only when it reproduces under a held-out-cohort test and passes minimum support rules. Cluster names are assigned from discriminative markers for readability; text names do not determine similarity or clustering.
+
+The label-space procedure is evaluated without any hand mapping. The project's own hand mapping was removed entirely in protocol v2 (as a method, a gate and a validation source); agreement is measured only against published references (CellMarker 2.0 and the Cell Ontology). This prevents the method from tuning its ontology against the answer it is later judged on.
+
+## 7. Supervised cell-type training
+
+Once the shared label space exists, cells whose native labels map into it can supervise the encoder. The main model uses the pretrained token layer and predicts shared clusters from $z_{cell}$.
+
+The training objective in Stage 6 contains:
+
+- a prototype-based cell-type loss, with one learned prototype per shared cluster;
+- masked-marker reconstruction as an auxiliary representation loss;
+- confidence weighting where a cohort supplies label confidence;
+- optional VICReg and other controls, tested by ablation rather than assumed to help.
+
+Prototype initialization uses the marker signatures from the label-space stage. This gives each prototype a biologically interpretable starting point and makes prototype drift measurable. Training uses class-balanced sampling and early stopping on validation slides from the training cohorts. The held-out cohort is never used for early stopping.
+
+## 8. Domain-shift control
+
+Stage 3 tests whether the cell embedding contains technical slide information. A gradient-reversal adversary tries to predict slide identity while the encoder receives the reversed gradient and is encouraged to remove slide-specific information.
+
+The adversary targets slide identity, not cohort identity. Cohort is confounded with tissue and disease in this dataset, so removing cohort information could also remove real biology. Only slide distinctions that can be compared within shared patients are used for the strongest technical-invariance check.
+
+The adversary is selected by a lambda sweep. A fresh discriminator is trained from scratch on the frozen embedding and evaluated on unseen slides. This is more reliable than reading only the discriminator trained jointly with the encoder, because a jointly trained discriminator can fail for optimization reasons while slide information remains present.
+
+The final shipped configuration is determined by the gates. If the adversarial arm does not improve cross-cohort macro-F1, the non-adversarial arm is kept. Domain invariance is a constraint, not a goal that should erase tissue-specific biology.
+
+## 9. Evaluation protocol
+
+The primary protocol is seven-fold LOCO over the registered cohorts:
+
+1. select one complete cohort as the test cohort;
+2. build training-only label-space and model artifacts for the other cohorts;
+3. split the training cohorts by patient into train, validation, and test patients (a patient's slides never fall on both sides);
+4. fit normalization probes, the token encoder, and the cell-type model using training data only;
+5. select epochs and ablations using training-cohort validation data only;
+6. evaluate once on every cell or a declared reproducible sample from the held-out cohort;
+7. repeat until each cohort has served as the unseen test cohort.
+
+The headline metric is macro-F1 over reliable shared clusters:
+
+$$
+F1_{macro} = \frac{1}{K}\sum_{k=1}^{K} \frac{2P_kR_k}{P_k+R_k}
+$$
+
+Macro-F1 prevents abundant cell types from hiding failure on rare types. The report also includes per-class precision, recall, F1, balanced accuracy where applicable, confusion patterns, support, and the majority and random baselines. The generalization gap is reported as:
+
+$$
+\Delta_{gen} = F1_{in\text{-}distribution} - F1_{held\text{-}out}
+$$
+
+The gap is often more informative than one accuracy number because it separates ordinary classification quality from robustness to domain shift.
+
+## 10. Completely unseen cohort test
+
+An older Ferguson frozen-holdout protocol (train on five cohorts, score Ferguson as pure test data) and a new-cohort script (place a new cohort's labels into the frozen partition and run a forward pass with no retraining) were part of `pipeline2`. They were written for the old 5+1 roster and are archived, not ported, in `dropped_past_works/pipeline2_stale/` (`s7_eval.py`, `s9_newcohort.py`). The seven-fold LOCO protocol, with a label space built inside each fold without its held-out cohort, is the only protocol in `celltype_transfer/`. Do not mix the two in one report, and do not present the whole-roster label space as blind to any cohort: it was built with every cohort present.
+
+## 11. What would count as biological success?
+
+The central claim is supported only if all of the following hold together:
+
+- held-out macro-F1 is clearly above majority and random baselines;
+- performance is stable across held-out cohorts, not driven by one easy dataset;
+- per-cell-type results show transfer of biologically meaningful rare types, not only broad abundant classes;
+- removing or masking panel markers causes a measured, interpretable degradation rather than a collapse caused by missing-value coding;
+- the representation cannot be strongly decoded for technical slide identity while retaining cell-type performance;
+- newly observed labels can be rejected as novel instead of being forced into an incorrect known class;
+- the result remains after excluding unreliable ontology branches and after reporting the exact label-space construction used in each fold.
+
+Together, these tests distinguish biological generalization from memorizing cohort-specific marker scales, panels, label names, or slide artifacts.
+
+## 12. Current limitations
+
+- The spatial-context stage (Gate 4) passed on its declared checks, but its paired 95% interval for (neighbourhood − cell) spans zero over 7 folds. So "spatial context improves transfer" is not yet an earned claim. Its `cell` baseline also uses the 3-loss configuration, not the shipped 2-loss one.
+- Pixel-size values marked `ASSUMED` are measurement risks and should be verified before using physical distances.
+- The shared ontology is inferred from marker signatures. It can merge biologically distinct labels when the available panel lacks discriminative markers.
+- A frozen vocabulary cannot use genuinely novel proteins unless the model is retrained and the benchmark is repeated.
+- The old Ferguson holdout path and the current seven-fold LOCO registry must be kept separate in reports.
+
+## 13. How to run
+
+The code is in `celltype_transfer/`. `python celltype_transfer/run.py` lists every step in order; `python celltype_transfer/run.py cpu` runs the local steps 1–8. Steps 9–12 need a GPU and run on Kaggle (`celltype_transfer/gpu/README.md`).
+
+| # | Step (file) | What it does | Gate |
+|---|---|---|---|
+| 1 | `load_cohorts.py --build` | reads each dataset into one standard table (`work/raw/`) | 0 |
+| 2 | `resolve_markers.py --offline` | resolves marker names to (gene, epitope, modification) triples | 0b |
+| 3 | `harmonise_values.py` (`--bakeoff`) | per-cohort rank values, 40,000-cell sample | 1 |
+| 4 | `build_label_space.py --expect gate1b_v4_expect.csv` | the shared label space, from marker signatures | 1b |
+| 5 | `build_marker_vocabulary.py` | the frozen 109-triple vocabulary and the wide value tables | – |
+| 6 | `build_label_confidence.py` | per-cell label confidence (only UPMC has a real one); needs step 5 | – |
+| 7 | `build_fold_label_spaces.py --folds` | one label space per fold, built without the held-out cohort | 1b-fold |
+| 8 | `build_neighbour_graph.py` | 15 nearest neighbours per cell, from the full raw tables | 4 (checks 6–7) |
+| 9 | `pretrain_masked_markers.py --check`, `--loto` | masked-marker pretraining; fold-local warm starts | 2 |
+| 10 | `train_prototype_classifier.py --ablate-losses` | the headline LOCO classifier and its loss ablation | 6 |
+| 11 | `train_adversarial_encoder.py --lambda-sweep` | the slide adversary, λ sweep | 3 |
+| 12 | `train_spatial_context.py --gate` | does the spatial neighbourhood help? | 4 |
+| 13 | `compare_external_baseline.py --gate` | the published MAPS method on the same folds | 10 |
+| 14 | `compare_labels_to_clusters.py` | native labels vs unsupervised clusters | – |
+
+Shared helpers: `config.py` (the cohort registry and every path), `splits.py` (the patient split), `metrics.py`, `loaders.py`, `panel_utils.py`, `models/` (the network pieces). Pre-registered gate rules live in `celltype_transfer/declared/gate*_expect.csv`. `celltype_transfer/tests/golden.py --check` proves a code change did not change any weight or score.
