@@ -1,0 +1,9 @@
+cohort,native_label,category,reason
+CRC,dirt,not_a_cell,"the cohort's own word for non-cell material picked up by segmentation. Not a cell type by the annotator's own statement."
+CRC,undefined,unassigned,"the annotator could not assign these cells. 'Unassigned' is not a cell type, and a cluster built around it is a cluster of everything the panel could not resolve."
+Keren,Unidentified,unassigned,"same as CRC undefined - the annotator's explicit non-answer."
+CRC,immune cells / vasculature,ambiguous_multitype,"the slash is the annotator saying they could not decide between two cell types. A label that is two types cannot be one cluster, and it bridges the two it names."
+CRC,tumor cells / immune cells,ambiguous_multitype,"same slash rule. Tumour and immune are the two compartments the label space most needs kept apart."
+Danenberg,Macrophages & granulocytes,ambiguous_multitype,"two named cell types in one label."
+Danenberg,CD4^{+} T cells & APCs,ambiguous_multitype,"two named cell types in one label."
+Danenberg,T_{Reg} & T_{Ex},ambiguous_multitype,"two named T-cell states in one label."

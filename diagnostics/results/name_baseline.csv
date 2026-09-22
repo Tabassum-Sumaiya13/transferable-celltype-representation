@@ -1,0 +1,6 @@
+method,clusters,cases,bad_merges,bad_merge_rate,ari_vs_shipped
+SHIPPED (signatures),21,9/15,6/248,0.0242,1.0
+token_jaccard,21,1/15,87/248,0.3508,0.016
+char3_jaccard,21,1/15,86/248,0.3468,0.038
+tfidf_char,21,3/15,31/248,0.125,0.161
+exact_name,21,7/15,206/248,0.8306,0.01

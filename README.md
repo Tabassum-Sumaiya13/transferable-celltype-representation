@@ -16,7 +16,7 @@ The strongest test is not random cell-level cross-validation. Cells from the sam
 
 ## 2. Cohort design
 
-The registry in `pipeline2/config.py` describes each cohort declaratively. The current roster contains CRC and UPMC CODEX data, Keren MIBI-TOF data, Ferguson IMC data, Phillips CODEX data, Danenberg IMC data, and Sorin IMC data. Each specification records the tissue, disease, platform, pixel size, value scale, source tables, marker columns, coordinates, patient identifiers, and native labels.
+The registry in `celltype_transfer/config.py` describes each cohort declaratively. The current roster contains CRC and UPMC CODEX data, Keren MIBI-TOF data, Ferguson IMC data, Phillips CODEX data, Danenberg IMC data, and Sorin IMC data. Each specification records the tissue, disease, platform, pixel size, value scale, source tables, marker columns, coordinates, patient identifiers, and native labels.
 
 The loader converts every source into one standard table:
 
@@ -90,7 +90,7 @@ Cross-cohort comparison uses within-cohort, between-label scaling. This prevents
 
 Granularity is selected per branch. A proposed split is retained only when it reproduces under a held-out-cohort test and passes minimum support rules. Cluster names are assigned from discriminative markers for readability; text names do not determine similarity or clustering.
 
-The label-space procedure is evaluated without the hand mapping. The hand mapping is retained only as a secondary external reference, preventing the method from tuning its ontology against the answer it is later judged on.
+The label-space procedure is evaluated without any hand mapping. The project's own hand mapping was removed entirely in protocol v2 (as a method, a gate and a validation source); agreement is measured only against published references (CellMarker 2.0 and the Cell Ontology). This prevents the method from tuning its ontology against the answer it is later judged on.
 
 ## 7. Supervised cell-type training
 
@@ -121,7 +121,7 @@ The primary protocol is seven-fold LOCO over the registered cohorts:
 
 1. select one complete cohort as the test cohort;
 2. build training-only label-space and model artifacts for the other cohorts;
-3. split the training cohorts by slide into train, validation, and test slides;
+3. split the training cohorts by patient into train, validation, and test patients (a patient's slides never fall on both sides);
 4. fit normalization probes, the token encoder, and the cell-type model using training data only;
 5. select epochs and ablations using training-cohort validation data only;
 6. evaluate once on every cell or a declared reproducible sample from the held-out cohort;
@@ -143,9 +143,7 @@ The gap is often more informative than one accuracy number because it separates 
 
 ## 10. Completely unseen cohort test
 
-The repository also contains an older Ferguson frozen-holdout script in `pipeline2/s7_eval.py`. That protocol trains on five cohorts and scores Ferguson, an unseen IMC skin cohort with a different panel, as pure test data. It is useful as a strict zero-shot demonstration, but it is not the same as the current seven-fold LOCO protocol because the shipped label-space artifacts and checkpoint logic were originally built around Ferguson.
-
-For a clean final claim, use the training-only label spaces B1/B2 or rebuild the full LOCO artifacts inside each fold. Do not present label space A as blind to Ferguson: it was formed with Ferguson present. A new cohort arriving after training is handled by `pipeline2/s9_newcohort.py`: intersect its markers with the frozen vocabulary, place its labels into the frozen partition by marker signatures, mark unassignable labels as novel, and run a forward pass with no retraining or tuning.
+An older Ferguson frozen-holdout protocol (train on five cohorts, score Ferguson as pure test data) and a new-cohort script (place a new cohort's labels into the frozen partition and run a forward pass with no retraining) were part of `pipeline2`. They were written for the old 5+1 roster and are archived, not ported, in `dropped_past_works/pipeline2_stale/` (`s7_eval.py`, `s9_newcohort.py`). The seven-fold LOCO protocol, with a label space built inside each fold without its held-out cohort, is the only protocol in `celltype_transfer/`. Do not mix the two in one report, and do not present the whole-roster label space as blind to any cohort: it was built with every cohort present.
 
 ## 11. What would count as biological success?
 
@@ -163,8 +161,31 @@ Together, these tests distinguish biological generalization from memorizing coho
 
 ## 12. Current limitations
 
-- The spatial graph/context stage is present in the project design but deferred in the validated training path. The current headline representation is marker-based, not a demonstrated spatial-neighbourhood representation.
+- The spatial-context stage (Gate 4) passed on its declared checks, but its paired 95% interval for (neighbourhood − cell) spans zero over 7 folds. So "spatial context improves transfer" is not yet an earned claim. Its `cell` baseline also uses the 3-loss configuration, not the shipped 2-loss one.
 - Pixel-size values marked `ASSUMED` are measurement risks and should be verified before using physical distances.
 - The shared ontology is inferred from marker signatures. It can merge biologically distinct labels when the available panel lacks discriminative markers.
 - A frozen vocabulary cannot use genuinely novel proteins unless the model is retrained and the benchmark is repeated.
 - The old Ferguson holdout path and the current seven-fold LOCO registry must be kept separate in reports.
+
+## 13. How to run
+
+The code is in `celltype_transfer/`. `python celltype_transfer/run.py` lists every step in order; `python celltype_transfer/run.py cpu` runs the local steps 1–8. Steps 9–12 need a GPU and run on Kaggle (`celltype_transfer/gpu/README.md`).
+
+| # | Step (file) | What it does | Gate |
+|---|---|---|---|
+| 1 | `load_cohorts.py --build` | reads each dataset into one standard table (`work/raw/`) | 0 |
+| 2 | `resolve_markers.py --offline` | resolves marker names to (gene, epitope, modification) triples | 0b |
+| 3 | `harmonise_values.py` (`--bakeoff`) | per-cohort rank values, 40,000-cell sample | 1 |
+| 4 | `build_label_space.py --expect gate1b_v4_expect.csv` | the shared label space, from marker signatures | 1b |
+| 5 | `build_marker_vocabulary.py` | the frozen 109-triple vocabulary and the wide value tables | – |
+| 6 | `build_label_confidence.py` | per-cell label confidence (only UPMC has a real one); needs step 5 | – |
+| 7 | `build_fold_label_spaces.py --folds` | one label space per fold, built without the held-out cohort | 1b-fold |
+| 8 | `build_neighbour_graph.py` | 15 nearest neighbours per cell, from the full raw tables | 4 (checks 6–7) |
+| 9 | `pretrain_masked_markers.py --check`, `--loto` | masked-marker pretraining; fold-local warm starts | 2 |
+| 10 | `train_prototype_classifier.py --ablate-losses` | the headline LOCO classifier and its loss ablation | 6 |
+| 11 | `train_adversarial_encoder.py --lambda-sweep` | the slide adversary, λ sweep | 3 |
+| 12 | `train_spatial_context.py --gate` | does the spatial neighbourhood help? | 4 |
+| 13 | `compare_external_baseline.py --gate` | the published MAPS method on the same folds | 10 |
+| 14 | `compare_labels_to_clusters.py` | native labels vs unsupervised clusters | – |
+
+Shared helpers: `config.py` (the cohort registry and every path), `splits.py` (the patient split), `metrics.py`, `loaders.py`, `panel_utils.py`, `models/` (the network pieces). Pre-registered gate rules live in `celltype_transfer/declared/gate*_expect.csv`. `celltype_transfer/tests/golden.py --check` proves a code change did not change any weight or score.

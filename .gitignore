@@ -1,12 +1,29 @@
+# data and large local outputs (rebuilt by the pipeline)
 /Datasets/
 /papers
-
-.claude/
+/work/
+/work_reference
+/work_reference/
+/dropped_past_works/
 dataset_reports/
-work/
 
+# local tooling
+.claude/
+
+# python
 __pycache__/
 *.pyc
 
+# local-only files
+/armtest.log
+/FYDP_Group4.zip
+
+# old folders that must not come back
 discard_old_pipeline_nd_result/
 _validation/
+panel_design/
+pipeline2/
+pipeline3/
+
+# stage reports stay local
+/reports/
