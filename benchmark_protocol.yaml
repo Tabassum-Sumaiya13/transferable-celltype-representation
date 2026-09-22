@@ -1,0 +1,341 @@
+protocol_name: cross_cohort_spatial_proteomics_benchmark
+version: 2
+status: pre_registered
+supersedes: version 1 (2026-09-10)
+revised: 2026-09-11
+seed: 20260810
+
+changes_from_v1:
+  - Hand mapping removed entirely as a method, a gate and a validation source.
+    Replaced by two external, versioned, published references (Cell Ontology, CellMarker 2.0).
+    Reason - it covered 4 of 7 cohorts, it was written by the same author as the method, and
+    the project's own H15 note records that it "tests nothing external".
+  - Old pipeline results dropped. The frozen current-pairwise baseline is dropped with them.
+    Comparison is now against controls, ablations and published external methods only.
+  - Evaluation split into two explicit layers - label-space quality, and annotation performance.
+  - Metrics extended - Cohen's kappa, risk-coverage AURC, calibration error, V-measure, AMI,
+    support-stratified F1, per-platform breakdown, negative controls.
+  - Gate failure policy added.
+
+research_question: >-
+  Can a shared cell-type label space be derived from marker profiles alone, without a
+  hand-written dictionary, such that a model trained on it annotates an unseen cohort and an
+  unseen tissue?
+
+# =====================================================================================
+# 1. THE THREE LABEL TYPES - never collapse these
+# =====================================================================================
+label_types:
+  native:
+    source: supplied by each dataset
+    vocabulary: per-cohort, inconsistent across cohorts
+    role: raw input only
+    rule: Never treated as correct. Cohort annotation error propagates and must be reported.
+  harmonized:
+    source: produced by this project's method
+    role: model targets / pseudo-labels
+    rule: >-
+      NOT ground truth. Every claim must say "the derived space", never "the correct space".
+      A harmonized cluster is a hypothesis about cell identity, evaluated, not assumed.
+  reference:
+    source: external published databases only
+    role: evaluation only - never a training target, never read by any method module
+    permitted_sources:
+      - name: Cell_Ontology
+        file: work/ext/cl_terms.json
+        version: releases/2026-06-08
+        citation: Diehl AD et al., The Cell Ontology 2016. J Biomed Semantics 7:44
+      - name: CellMarker_2.0
+        file: work/ext/cellmarker_human.parquet
+        rows: 53978
+        citation: Hu C et al., CellMarker 2.0. Nucleic Acids Research 2023;51:D870-D876
+        join_key: Symbol -> marker_registry.gene
+      - name: ASTIR_marker_priors
+        role: external curated label space, used as a comparison arm
+    forbidden_sources:
+      - any hand-written mapping authored inside this project
+    enforcement: >-
+      A code check must assert that no module under pipeline2/ outside the designated scoring
+      modules reads a reference file or names an ontology term. Failure voids every number.
+
+# =====================================================================================
+# 2. SCOPE
+# =====================================================================================
+scope:
+  modality: spatial_proteomics
+  cohorts:
+    CRC:       {platform: CODEX,    tissue: colorectal,     disease: colorectal cancer}
+    UPMC:      {platform: CODEX,    tissue: head_and_neck,  disease: HNSCC}
+    Keren:     {platform: MIBI-TOF, tissue: breast,         disease: TNBC}
+    ferguson:  {platform: IMC,      tissue: skin,           disease: cutaneous SCC}
+    Phillips:  {platform: CODEX,    tissue: skin,           disease: cutaneous T cell lymphoma}
+    Danenberg: {platform: IMC,      tissue: breast,         disease: breast cancer (METABRIC)}
+    Sorin:     {platform: IMC,      tissue: lung,           disease: lung adenocarcinoma}
+  confounds_to_report:
+    tissue_replicated: [breast (Keren, Danenberg), skin (ferguson, Phillips)]
+    platform_replicated: [CODEX (CRC, UPMC, Phillips), IMC (ferguson, Danenberg, Sorin), MIBI-TOF (Keren)]
+    note: >-
+      Tissue and platform are partly confounded with cohort. Skin is the only tissue split
+      across two platforms. Every headline must be reported per platform as well as overall.
+
+# =====================================================================================
+# 3. PREPROCESSING - frozen, applies identically to every arm
+# =====================================================================================
+preprocessing:
+  standard_table: [cell_id, cohort, image_id, patient_id, x_px, y_px, area_px2, native_label, label_confidence]
+  marker_identity: canonical_marker_triple
+  non_protein_channels: exclude_from_biological_vocabulary
+  duplicate_reagents: rowwise_mean_with_skipna
+  value_transform: cohort_level_midrank_ecdf
+  missing_marker_policy: explicit_absent_marker_mask
+  vocabulary_source: work/panel.json
+  vocabulary_rule: >-
+    Built from ALL 7 cohorts, frozen once, never expanded during testing. A single vocabulary
+    must serve every stage - two live vocabularies is a defect, not a variant.
+
+# =====================================================================================
+# 4. SPLITS
+# =====================================================================================
+splits:
+  primary:
+    name: LOCO
+    unit: cohort
+    folds: 7
+    description: Hold out one complete cohort; repeat for every cohort.
+  secondary:
+    name: LOTO
+    unit: tissue
+    folds: 5
+    description: Hold out every cohort of one tissue at once.
+    detail:
+      - {tissue: breast,        held_out: [Keren, Danenberg]}
+      - {tissue: skin,          held_out: [ferguson, Phillips]}
+      - {tissue: colorectal,    held_out: [CRC]}
+      - {tissue: head_and_neck, held_out: [UPMC]}
+      - {tissue: lung,          held_out: [Sorin]}
+    interpretation: >-
+      Singleton-tissue folds are identical to their LOCO fold and must be labelled as such.
+      Only breast and skin are true tissue-holdout folds.
+  within_training:
+    split_unit: patient
+    fallback_unit: slide
+    fallback_rule: Slide only where patient_id is missing or constant; state which cohorts fell back.
+    fractions: {train: 0.68, validation: 0.12, test: 0.20}
+    rule: Never place cells from the same patient in both training and validation/test.
+    consistency: Every caller must pass the same id format to the splitter.
+
+# =====================================================================================
+# 5. LABEL SPACE CONSTRUCTION
+# =====================================================================================
+label_space:
+  primary_rule: Build from TRAINING cohorts only, inside every LOCO and LOTO fold.
+  test_label_mapping: >-
+    Map held-out native labels into the frozen training label space by marker evidence only,
+    using the same admission rule the partition was built with.
+  unsupported_label_rule: Mark NOVEL or UNTESTABLE. Never force into the nearest known class.
+  scope_rule:
+    global: supported by >= 3 tissues
+    tissue_scoped: supported by < 3 tissues
+    reporting: Tissue-scoped clusters are excluded from the global headline and reported separately.
+  granularity_rule: >-
+    Any comparison between two label spaces must either match the number of scored classes,
+    or report the cluster counts and treat the comparison as confounded.
+
+# =====================================================================================
+# 6. METHODS
+# =====================================================================================
+methods:
+  controls:
+    - {name: majority,          description: Always predict the most frequent training class.}
+    - {name: random_stratified, description: Seeded draws from the training label distribution.}
+  negative_controls:
+    - {name: permuted_labels,  description: Permute native labels within cohort before harmonisation.}
+    - {name: permuted_markers, description: Permute marker identities within cohort.}
+    expected_result: Must collapse toward the majority/random baseline. If not, the pipeline is leaking.
+  internal_baselines:
+    - {name: marker_distance, description: Nearest training profile using only markers measured in the query. No learning.}
+  proposed_methods:
+    - name: route_a_fixed_pairwise
+      description: Pairwise label alignment with robust scaling, positive fractions, geometric veto, evidence masking.
+    - name: route_b_reference_profiles
+      description: Iterative profile construction and label assignment in the union marker space, with scope.
+    - name: route_c_learned_prototypes
+      description: Panel-masked prototype learning with consistency and collapse controls.
+  external_baselines:
+    reproduce_on_our_data: [MAPS, ASTIR, STELLAR]
+    contextual_only: [CellSighter]
+    contextual_reason: Requires image crops. Raw images are available for one cohort only.
+    requirement: >-
+      Published numbers are never placed in the direct leaderboard. A method appears in the
+      direct table only if it was re-run on our folds, our cells, our label space, our metric.
+
+# =====================================================================================
+# 7. EVALUATION - two layers, reported separately
+# =====================================================================================
+evaluation:
+
+  layer_1_label_space_quality:
+    question: Is the derived space a good cell-type vocabulary? (no classifier involved)
+    metrics:
+      external_marker_agreement:
+        source: CellMarker_2.0
+        method: >-
+          Match each cluster's top discriminative marker genes against CellMarker's marker set
+          per cell type; report best-match Jaccard, the matched cell_name and its CL id.
+        report: [per_cluster_score, share_of_clusters_with_confident_match, unmatched_clusters]
+      ontology_structure_agreement:
+        source: Cell_Ontology
+        method: >-
+          Using the CL ids obtained above, compare the derived partition against CL structure
+          at published CL slim levels. The CL assignment is automatic, never hand-chosen.
+        report: [agreement_per_slim_level, permutation_null]
+      internal_coherence: [within_vs_between_cluster_spread, silhouette_marker_space]
+      cross_cohort_support: [share_clusters_ge_2_cohorts, share_clusters_ge_3_tissues, share_cells_in_cross_cohort_cluster]
+      confound_checks: [cohort_ari, tissue_ari, platform_ari]
+      stability: [resample_cells, resample_slides, leave_one_cohort_out, leave_one_tissue_out]
+      route_agreement: [ari, ami, nmi, v_measure]
+      v_measure_note: Report homogeneity and completeness separately - they say WHICH way a partition fails.
+      biological_exclusion:
+        rule: No cluster may be simultaneously high on mutually exclusive lineage markers.
+        source: declared exclusion pairs, scoring only, never read by any method module
+    acceptance_rule: >-
+      A valid harmonized cluster must be biologically coherent AND supported by more than one
+      cohort. A cluster carried by a single cohort is reported as cohort-exclusive, never hidden,
+      and is excluded from the global headline.
+
+    declared_case_scoring:   # added 2026-09-11 after a measured failure of the previous rule
+      rule: >-
+        Report `same` cases and `different` cases SEPARATELY, never as one combined count.
+        A `same` case counts as a GENUINE pass only if its members merge in a cluster that is
+        not the largest cluster and not a residual cluster (one named by no positive marker).
+      why: >-
+        A `same` case is satisfied by ANY cluster large enough to swallow its members, so a
+        combined pass count rewards coarse partitions. Measured 2026-09-11: a Route A variant
+        reported as lifting required cases 2/9 -> 7/9 had earned every one of its `same`
+        passes by merging into a single 48-label keratin+/CD45- blob, while at those cuts the
+        discrimination case (Phillips T-cell-lymphoma `tumor cells` vs CRC epithelial
+        `tumor cells`) FAILED. Re-scored with this rule, no variant beat the original distance.
+      applies_to: >-
+        Every comparison between label-space variants, INCLUDING internal ablations. The
+        granularity_rule in section 5 was applied to external comparisons and not to internal
+        ones; that asymmetry is what let the artifact through.
+
+  layer_2_annotation_performance:
+    question: Does a model trained on this space annotate an unseen cohort / tissue?
+    primary_metric: macro_f1_over_reliable_global_classes
+    primary_protocols: [LOCO, LOTO]
+    secondary_aggregate: [balanced_accuracy, cohen_kappa, weighted_f1, macro_f1_all_classes]
+    macro_f1_all_classes_note: >-
+      Includes clusters with no training support on that fold, which score 0 by construction.
+      Reported beside the reliable-class number, never instead of it.
+    per_class_required: [precision, recall, f1, support]
+    support_stratified_f1: Bin classes by support and report F1 per bin - rare types are the hard part.
+    confusion: Report the top confused class pairs per fold, not only the aggregate.
+    per_platform_breakdown: [CODEX, MIBI-TOF, IMC]
+
+  layer_2_open_set:
+    question: Can the model say "I do not know" on a type it was never given?
+    metrics:
+      novel_detection: [auprc, auroc]
+      auprc_note: AUPRC is primary - novel classes are rare, and AUROC flatters under imbalance.
+      selective_prediction: [risk_coverage_curve, aurc, accuracy_at_50_coverage, accuracy_at_80_coverage]
+      calibration: [expected_calibration_error, reliability_diagram]
+      rates: [untestable_label_rate, novel_label_rate, mixed_label_entropy]
+
+  layer_2_robustness:
+    panel_masking:
+      visible_marker_fractions: [1.0, 0.75, 0.50, 0.25]
+      rule: Mask measured markers only. Never convert an unmeasured marker into a biological negative.
+      report: macro_f1 and untestable_rate at each fraction
+    generalization_gap:
+      formula: LOCO_macro_f1 - LOTO_macro_f1
+      interpretation: How much of the score depends on having seen another cohort of the same tissue.
+    technical_shift_units: [slide, patient, cohort, tissue, platform]
+
+# =====================================================================================
+# 8. STATISTICS
+# =====================================================================================
+statistics:
+  seeds: 5
+  seed_varies: [model init, batch order, mask draw, cell draw]
+  seed_does_not_vary: [patient/slide split]
+  report: mean and 95 percent CI over seeds
+  paired_comparison:
+    method: per-fold difference on the SAME held-out cells
+    interval: bootstrap 95 percent CI
+    test: Wilcoxon signed-rank
+  honesty_rule: >-
+    n = 7 LOCO folds and n = 5 LOTO folds. Report intervals and effect sizes. Do not make
+    significance claims from this many folds, and never put a decision under a point estimate
+    whose interval spans the threshold.
+  effect_size: paired mean difference with CI; report folds won as a fraction.
+
+# =====================================================================================
+# 9. LEAKAGE RULES
+# =====================================================================================
+leakage_rules:
+  test_cohort_labels: forbidden_until_final_scoring
+  test_cohort_label_space_construction: forbidden
+  test_cohort_marker_selection: forbidden
+  test_cohort_threshold_tuning: forbidden
+  test_cohort_early_stopping: forbidden
+  test_cohort_model_selection: forbidden
+  test_cohort_raw_values: allowed_for_final_forward_pass_only
+  training_normalization_statistics: fit_within_training_fold_only
+  reference_databases: scoring_modules_only_never_a_method_input
+  random_seed: fixed_and_recorded
+
+# =====================================================================================
+# 10. GATE FAILURE POLICY  (new in v2)
+# =====================================================================================
+gate_failure_policy:
+  rule: >-
+    A declared check that fails is either FIXED, or WAIVED IN WRITING with a date, a stated
+    cause, and a stated consequence for scoring. It is never silently retried until it passes.
+  waiver_requires: [date, cause_measured_not_argued, scoring_consequence, retest_condition]
+  forbidden: Moving a declared threshold after seeing the result.
+  visibility: A waived failure is reported as a failure, not as a pass.
+
+# =====================================================================================
+# 11. REQUIRED OUTPUTS
+# =====================================================================================
+required_outputs:
+  metadata: [reports/protocol_used.yaml, reports/cohort_registry.csv, reports/run_manifest.json]
+  label_space: ["work/label_map_{method}_{fold}.csv", "work/profiles_{method}_{fold}.csv"]
+  predictions: ["reports/predictions_{method}_{fold}.parquet"]
+  results:
+    - reports/results_main.csv
+    - reports/results_per_fold.csv
+    - reports/results_per_class.csv
+    - reports/results_label_space.csv
+    - reports/results_open_set.csv
+    - reports/results_panel_masking.csv
+    - reports/results_route_agreement.csv
+    - reports/results_external.csv
+    - reports/results_negative_controls.csv
+  narrative: [reports/benchmark_results.md]
+
+result_tables:
+  main:
+    columns: [method, protocol, macro_f1, ci95, balanced_accuracy, cohen_kappa, novel_auprc, aurc]
+  per_fold:
+    columns: [method, protocol, held_out, macro_f1, majority_f1, random_f1, n_test_cells]
+  per_class:
+    columns: [method, protocol, held_out, class_name, scope, support, precision, recall, f1]
+  label_space:
+    columns: [method, n_clusters, cellmarker_agreement, cl_agreement, cohort_ari, tissue_ari, cross_tissue_share]
+  external:
+    columns: [method, comparison_kind, protocol, macro_f1, delta_vs_ours, ci95, folds_won]
+
+# =====================================================================================
+# 12. COMPARISON AND CLAIM POLICY
+# =====================================================================================
+comparison_policy:
+  direct_comparison: Same data, split, label space, test cells, preprocessing, and metric.
+  contextual_comparison: Published result on different data or splits. Never a direct ranking.
+  external_method_failure: Report unavailable_code_or_data. Never substitute an estimate.
+  final_claim: >-
+    The derived label space is supported only if it (a) beats the controls and the negative
+    controls, (b) matches or beats a published external method reproduced on the same folds,
+    (c) agrees with the external references above chance, and (d) degrades gracefully under
+    tissue and panel shift. Failing any of these is reported, not omitted.
