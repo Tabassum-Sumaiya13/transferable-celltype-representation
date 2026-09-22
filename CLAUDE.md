@@ -1,301 +1,163 @@
-# Project: Cross-cohort cell-type annotation (spatial proteomics)
-# Communication Style
+# CLAUDE.md
 
-Write like a senior engineer explaining something to a junior engineer.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## English
+## What this project is
 
-- Use simple English.
-- Prefer common words over academic words.
-- Keep sentences short.
-- One idea per sentence.
-- Avoid unnecessary adjectives.
-- Avoid motivational language.
-- Avoid sounding like a textbook.
+A research pipeline that learns cell-type representations from **spatial proteomics** data (CODEX, IMC, MIBI-TOF) across seven cohorts that disagree on panel, value scale, tissue, and label names. The headline claim is tested by **leave-one-cohort-out (LOCO)**: hide a whole cohort, train on the rest, score once.
 
-Bad:
-"Consequently, the methodology facilitates robust interoperability across heterogeneous datasets."
+`README.md` explains the science stage by stage. Read it before changing method logic.
 
-Good:
-"This method lets different datasets work together."
+## Environment
 
----
+Python 3.12, torch, pandas, numpy, matplotlib, scikit-learn. No `requirements.txt` — the environment is set up by hand. The local machine has **CPU-only torch**, so training stages need `--quick` (smoke test) or `--cpu`, and full gates are expected to run elsewhere.
 
-## Structure
+`Datasets/` and `work/` are gitignored. `Datasets/` must be populated before Stage 0 can build anything.
 
-Always answer in this order:
+## Running stages
 
-1. Direct answer (1-2 sentences)
-2. What it is
-3. Why it matters
-4. How it works (if needed)
-5. Example (only if it helps)
+All code is in `celltype_transfer/` (renamed from `pipeline2/` on 2026-09-17; stage files were renamed to say what they do). Every entry script adds its own folder to `sys.path`, so **run everything from the repo root**:
 
-Never hide the answer inside long paragraphs.
+```bash
+python celltype_transfer/run.py                 # list every step, in order, with its exact command
+python celltype_transfer/run.py cpu             # run the local CPU steps 1-8
+python celltype_transfer/load_cohorts.py --build
+python celltype_transfer/train_adversarial_encoder.py --lambda-sweep --quick
+```
 
----
+Every script's module docstring lists its exact invocations. Read the docstring first — the flags are not in `--help` (most scripts parse `sys.argv` directly, not argparse). `build_label_space.py` reads some flags at IMPORT time (the `RA` dict), so importing it from a script that was given those flags changes its behaviour.
 
-## Explanations
+Order, with the gate each step produces (old `pipeline2` name in brackets, for reading old reports):
 
-When explaining something:
+| # | Step | Command | Gate |
+|---|---|---|---|
+| 1 | load cohorts [s0_audit] | `load_cohorts.py --build` | 0 |
+| 2 | marker identity [s0b_markers] | `resolve_markers.py` (`--offline`: only the recorded answers in `work/api_cache.json`) | 0b |
+| 3 | value harmonisation [s1_values] | `harmonise_values.py` then `--bakeoff` | 1 |
+| 4 | label space [s1b_labels] | `build_label_space.py --expect gate1b_v4_expect.csv` (`--resign` rebuilds signatures; the script's default is the v1 cases file) | 1b |
+| 5 | vocabulary + wide tables [s2_tokens --build] | `build_marker_vocabulary.py` | — |
+| 6 | label confidence [s6_confidence] | `build_label_confidence.py` (after step 5: it keeps only the cells in the wide tables) | — |
+| 7 | fold-local label spaces [s7_spaces --folds] | `build_fold_label_spaces.py --folds` | 1b-fold |
+| 8 | neighbour graph [s4_spatial --build] | `build_neighbour_graph.py` | 4 (checks 6–7) |
+| 9 | masked-marker pretraining [s2_tokens] | `pretrain_masked_markers.py --check` then `--loto` | 2 |
+| 10 | classifier / losses [s6_train] | `train_prototype_classifier.py --ablate-losses` | 6 |
+| 11 | encoder + adversary [s3_encoder] | `train_adversarial_encoder.py --lambda-sweep` | 3 |
+| 12 | spatial context [s4_spatial] | `train_spatial_context.py --gate` (`--pilot` = 1 fold, a signal) | 4 |
+| 13 | external baseline [s10_external] | `compare_external_baseline.py --gate` | 10 |
+| 14 | labels vs clusters [s13_label_cluster_comparison] | `compare_labels_to_clusters.py` | — |
 
-- Start with the conclusion.
-- Explain only what the user asked.
-- Add extra information only if it is important.
-- Never use analogies unless the user asks.
+Steps 9–12 need a GPU and run on Kaggle: `celltype_transfer/gpu/README.md` (bundle → notebook → `import_gpu_results.py`). The old 5-cohort stages (s1b_control main, s1c, s7_eval, s7b, s8, s9, s12) are archived in `dropped_past_works/pipeline2_stale/`, not ported.
 
----
+Shared flags on the model stages: `--quick` (tiny smoke run, scores nothing — use this to prove a code path), `--refit` (ignore the checkpoint cache), `--cpu` (force CPU), `--folds A,B` (hold out only these folds). There is no `--report` flag: re-running a stage without `--refit` loads every finished fit from `work/ckpt/` and re-writes the report.
 
-## Programming
+`CT_WORK` and `CT_REPORTS` environment variables redirect `work/` and `reports/` (used by the golden test and for side-by-side runs).
 
-Always explain:
+**Tests.** `python celltype_transfer/tests/golden.py --check` is a characterisation test: tiny CPU fits of every model stage plus exact re-scores of reference checkpoints, compared by weight hash with `tests/golden.json`. Any refactor must leave it PASSING — it proves no weight or score changed. Beyond that, **a stage's gate report is its test**: after changing a stage, re-run it and read the numbers in its `reports/*.md`. There is no linter.
 
-1. What is wrong.
-2. Why it is wrong.
-3. How to fix it.
-4. Correct code.
-5. Anything the fix changes.
+## Architecture
 
-Do not explain unrelated concepts.
+### One declarative registry, no cohort branches
 
----
+`celltype_transfer/config.py` holds `SPECS` — one dict per cohort describing base table, joins, marker-column rule, pixel size, and arrival scale. `loaders.py` is a single generic reader driven by those specs.
 
-## Research
+**There is no `if cohort == "X"` anywhere else in the codebase, and new code must not add one.** Adding a dataset means adding a dict.
 
-When discussing papers:
+`config.py` also owns every path (`WORK`, `VALUES`, `PANEL` = `celltype_transfer/declared/`, `REPORTS`, `RAW`), `SEED = 20260810`, `full_table(cohort)` and `rng(*purpose)` (the one per-purpose RNG every stage uses). Import from it; never hard-code a path. `models/device.py` holds the one device rule (`DEV`).
 
-- State the contribution first.
-- Then explain the method.
-- Then explain the results.
-- Finally explain the limitations.
+### The chain of artifacts
 
-Avoid long literature-style introductions.
+Stages talk to each other mainly through files in `work/`:
 
----
+- `work/raw/{cohort}.parquet` — standard table, all cells, nothing dropped (Stage 0)
+- `work/marker_registry.csv` — every raw marker column resolved to a `(gene, epitope, modification)` **triple** (Stage 0b)
+- `work/values/{cohort}.parquet` — per-cohort mid-rank ECDF values, 40,000-cell stratified subsample (Stage 1)
+- `work/label_signatures.npz`, `label_map.csv`, `label_graph.json`, `prototypes.npy` — the derived shared label space (step 4)
+- `work/label_conf/{cohort}.parquet` — per-cell label confidence (step 5)
+- `work/panel.json`, `work/values/{cohort}_full.parquet`, `marker_dynamic_range.csv` — the **frozen** marker vocabulary, one stable index per triple, and the wide tables every model reads (step 6)
+- `work/spaces/` — one label space per fold + `index.json` hashes (step 7)
+- `work/values/{cohort}_neighbours.npz`, `neighbour_graph_summary.csv` — the kNN graph (step 8)
+- `work/ckpt/{pretrain,encoder,classifier,spatial,external}_*.pt` — cached fits, bypassed with `--refit`
 
-## Lists
+Later stages also import earlier ones as modules (`import pretrain_masked_markers as pretrain`, `import train_adversarial_encoder as adversarial`, `import train_prototype_classifier as classifier`) to reuse their builders. `train_spatial_context.py` reads and PATCHES `classifier`'s module globals (`N_TRAIN`, `SCORE_CELLS`, `EPOCHS`, ...). Changing a builder's signature or a global's name breaks downstream stages silently — grep before renaming, and run the golden test.
 
-Prefer bullets over paragraphs.
+### Three ideas the whole design rests on
 
-Bad:
+1. **Marker identity is a triple, not a name.** CD45, CD45RA and CD45RO are all `PTPRC`; resolving to the gene alone would merge antibodies marking opposite states. `declared/never_merge.csv` is an assertion that the resolver works.
+2. **An unmeasured marker is not a zero.** A cohort that never measured a marker gets an explicit absent-marker embedding. A zero means "negative", which is a different and false claim. Any change that reintroduces zero-filling is a bug.
+3. **The label space is derived from marker signatures, not from names.** Text names are for readability only; they never drive clustering or similarity.
 
-A paragraph containing six different ideas.
+### Two evaluation protocols — keep them apart
 
-Good:
+- **7-fold LOCO** (`dropped_past_works/benchmark_protocol.yaml`) is the headline protocol and the only one in `celltype_transfer/`.
+- **Ferguson frozen holdout** (`s7_eval.py`, archived in `dropped_past_works/pipeline2_stale/`) was an older zero-shot demo trained on five cohorts.
 
-- First point
-- Second point
-- Third point
+The whole-roster label space (`work/label_map.csv`) **was built with every cohort present** and must never be described as blind to any of them. LOCO numbers use the fold-local spaces. Do not mix the two protocols in one report.
 
----
+### Subsampling and the spatial exception
 
-## Length
+Stages 1 onward work on a 40,000-cell stratified subsample per cohort (`N_SUB` in `harmonise_values.py`). The spatial stage is the exception: nearest neighbours inside a 1.9% subsample are not neighbours at all, so `build_neighbour_graph.py` reads the **full** raw tables and writes neighbour sidecars. Never rebuild the graph from `work/values/`.
 
-Use the shortest answer that fully answers the question.
+## Gates and the pre-registration rule
 
-Do not repeat yourself.
-
-Do not summarize the same idea multiple times.
-
----
-
-## Tone
-
-Be professional.
-
-Be direct.
-
-Do not be overly enthusiastic.
-
-Do not use phrases like:
-- "Great question!"
-- "Let's dive in."
-- "Imagine..."
-- "Think of it like..."
-- "Essentially..."
-- "In other words..." (unless needed)
-
----
-
-## Definitions
-
-Format:
-
-Definition:
-<one sentence>
-
-Purpose:
-<one sentence>
-
-Example:
-<very short example>
-
----
-
-## If explaining results
-
-Use this order:
-
-Result:
-What happened?
-
-Meaning:
-What does it mean?
-
-Reason:
-Why did it happen?
-
-Next:
-What should be checked next?
-
-Keep each section under 3 sentences.
-
----
-
-## Default Rule
-
-If a sentence can be made shorter without losing meaning, shorten it.
-
-This file is short on purpose. It is read automatically every session.
-The full project history lives in `files/`, split into files so you
-only load what a given task needs. Do not read all of them by default —
-use the table below to pick the right one(s).
-
-## One-paragraph orientation
-
-Building a model that labels every cell in a spatial-proteomics tissue image
-(T cell, tumour cell, fibroblast…) and still works on a hospital/machine/panel
-it has never seen. Central claim: label harmonisation across cohorts can be
-learned from marker profiles instead of a hand-written ontology. Repo:
-`pipeline2/`. Old pipeline (plateaued at 0.630 macro-F1) is still in
-`git HEAD:pipeline/`, kept only as a comparison baseline — do not build on it.
-
-Status as of 2026-08-11 (see file 09 for the live checklist):
-Stages 0, 0b, 1, 1b built and passing. **Stage 2 built and run — GATE 2 FAIL**: checks 2/3/4 pass,
-check 1 fails on one kept pair (Keren MKI67, R² −0.0117) and the FAIL is recorded, not repaired
-(D-34). Check 3, the question the stage exists to answer, passes: 0.1963 vs core-9 control 0.1707
-vs Gate 1 0.169. Arm B ([ABSENT] tokens) ships. **Stage 3 built and run — GATE 3 PASS**, cross-cohort
-macro-F1 0.3642 over 22 clusters, shipping λ = 0: the adversary does not help, which is the plan's
-declared fallback (D-36). Two findings outrank the verdict — it HIDES slide identity rather than
-removing it (D-37), and it does so even against a matched-capacity discriminator. **Stage 3b ran
-both rescue experiments (45 fits) and BOTH FAIL** (D-43): a stronger critic made hiding worse, and
-the patient-nested domain (my own D-38 hypothesis) made transfer worse at every λ. Removing batch
-signal more successfully made transfer WORSE — batch is not the bottleneck. **Stage 6 built and run
-— GATE 6 PASS**, 16 fits, 73.5 min, shipping the prototype head with 2 losses at 0.3901 (D-44).
-**Stage 7a built and run — GATE 7 DONE**, 3 fits, 20.0 min: the frozen holdout is finally
-scored at **0.3309**, and every stage of the pipeline has now been through its gate (D-50).
-**Stage 7b run too** — the abstain rule works (macro-F1 0.3309 → **0.4204** at 35% coverage) and
-novel-class detection **FAILS at AUROC 0.578** (D-52). **Step 4 done**, no compute: LOCO 0.3901 →
-**0.4606** learnable-only, and H7 is confirmed and closed (D-53). **2026-08-14 — Stage 9 run, Stages 10 and 11 built, and the priorities changed.**
-**Stage 9 (D-24's arrival test) is DONE**: Danenberg zero-shot **0.2161** (space A) / **0.2944** (B2),
-no training, no pipeline file edited — but only **24 of 99** vocabulary slots are filled, and the
-support-law correlation collapses to 0.295 there against ferguson's 0.843 (D-54). **Three marker-id
-errors are now measured and one — Keren `SMA` → SMN1 — is frozen inside the trained vocabulary**
-(D-55); it is recorded, not repaired, by user decision. **The project has NO valid external
-comparison**: the old pipeline's 0.630 and "MAPS cross-dataset 0.5-0.6" are BOTH withdrawn, the
-second because that number does not exist (D-56). **Stage 10 IS RUN and H13a IS CLOSED — the
-project has a real baseline at last, and the model wins it**: Stage 6 **0.3901** against MAPS
-(reimplemented from its published Methods) at **0.3447**, paired margin **+0.0454 [+0.0054,
-+0.0766]** on 4 of 5 folds (D-57). Two honest caveats travel with that number — it conflates panel
-width with architecture (99 markers vs 10), and gradient boosting on zero-filled features beats the
-shipped model on 2 of 5 folds. The bigger result is a different row: giving MAPS all 99 slots with
-unmeasured markers zero-filled drops it **0.3447 → 0.2116**, the first EXTERNAL evidence for
-Stage 2's premise that a zero is not a measurement. **Stage 11** (derived vs curated label space, H13b) is built and
-needs a GPU — and it already found that **Stage 1b cannot choose a granularity from 3 cohorts**
-(D-58). Step 3's 55 seed fits (H9) now rank BELOW those two: intervals on a number with no external
-comparison are polish. See the 2026-08-14 block at the top of file 10.
-**Stage 12 IS BUILT AND RUN — the 25-cluster label space finally has external validation, and it
-holds** (D-59, `reports/s12_ontology.md`). All 106 labels mapped to the **Cell Ontology** (Phillips
-and Sorin for the first time), then scored against CL's hierarchy and CL's OWN published levels:
-**ARI 0.4400 [0.3662, 0.6624] per label · 0.5725 reliable-only · 0.934 cell-weighted**, beating a
-1000-shuffle null at p99.9 at every level. The comparison that matters: Gate 1b scored the same
-clusters against the project's own hand mapping at 0.596 / 0.962, and an ontology nobody here wrote
-gives 0.440 / 0.934 over a **larger** label and class set — so the 0.928 was not marking your own
-homework. **CL places `Phillips|tumor cells` and `CRC|tumor cells` DISTANT and Stage 1b splits
-them**, refereeing the hardest case in the project from outside. Two costs travel with it: the
-**nesting layer failed its first external test** (0.282 of CL's parent-child pairs represented
-against a declared 0.60 — H2 is answered and the answer is no), and only 0.228 of labels resolved
-automatically, so the defensible sentence is *"the derived clusters agree with a published
-ontology's STRUCTURE"*, **never** *"the labels were mapped without human input"*. Also settled:
-**M6 was an artefact** — L1 agreement 0.629 → **0.9927** many-to-one, so stop quoting 0.629. Stage
-12 is the **first gate in this project ever scored with a confidence interval and a permutation
-null** (part of H9). No GPU, no training, minutes on CPU.
-⚠️ Gates 3/3b used an 88-triple vocabulary (pre-D-39); Stage 6 onward uses the canonical 99, so
-those numbers are not comparable — deliberate, see file 10.
-
-**Four things a new session must know before quoting any number.**
-1. Gate 6 PASSES its declared rule, but check 4's +0.0209 margin is **p = 0.460, 95% CI
-   [−0.0501, +0.0919]**, and all of it comes from the Sorin fold. No gate in this project has ever
-   been scored with a confidence interval (H9). The gates are valid decisions; several of the
-   *sentences* written about them are not. Read D-44 before citing Gate 6.
-2. **GATE 7 IS RUN. ferguson zero-shot macro-F1 = 0.3309** (22 reliable clusters, majority
-   0.0237). Three spaces: A 0.3309 shipped · B1 0.3080 clean-37 · B2 0.4240 clean-22 (D-50).
-   **Do not quote that average without splitting it.** Labels whose cluster is carried by ≥3
-   training cohorts average **0.5291**; those carried by ≤2 average **0.0014** — never
-   predicted at all. r = 0.843 on cohort count. This is Gate 6's support law replicating on an
-   unseen machine and tissue, and it is the strongest result in the project.
-   All three runs hit the 30-epoch ceiling, so the numbers are a LOWER BOUND.
-   ⚠️ Why three: the **H10 control FAILS** (D-46). Stage 1b clustered all 6 cohorts together,
-   so ferguson helped choose the label space's GRANULARITY — 25 clusters instead of the 37 the
-   5 training cohorts pick alone. The similarity structure is untouched (matched-cut ARI
-   0.9828); the coarseness is not. Space B2 prices the leak with the cut held fixed.
-3. **THE SUPPORT LAW IS THE FINDING — lead the thesis with it, not with any macro-F1.** A cell
-   type transfers if several cohorts independently agree on it, and does not otherwise. By number
-   of contributing training cohorts, LOCO mean F1 runs **0.000 · 0.092 · 0.223 · 0.636** (r =
-   0.781; not one of the 29 three-plus class-folds scores zero), and ferguson runs **0.0014 vs
-   0.5291** (r = 0.843). Measured inside the roster, on held-out cohorts, and on an unseen
-   machine and tissue; in three label spaces; and it predicted ferguson's failures before they
-   were scored (D-50, D-53). It also says what to do next: **add cohorts that overlap on the
-   types you care about** — not more markers, not more architecture.
-   ⚠️ **AMENDED 2026-08-14 — state it with TWO conditions, not one.** On Danenberg the correlation
-   falls to **0.295** (space A) / 0.278 (B2), because with only 24 of 99 marker slots filled,
-   PANEL OVERLAP replaces training support as the binding constraint. The rich/thin gap survives
-   (0.1487 vs 0.0222); the correlation does not. So: a type transfers if several cohorts
-   independently agree on it **AND** the new cohort measures enough of the markers that define it.
-   Quoting r = 0.843 as a stable constant is not supportable (D-54).
-4. **Always report macro-F1 twice** — all clusters and learnable-only (D-53). Under LOCO a
-   cluster whose only cohort is the held-out one has zero training examples and scores 0.000
-   whatever the model does: 9 of 55 class-folds. LOCO 0.3901 → 0.4606 learnable-only. Quote both
-   and say which is which; the first answers "how well does this annotate a new cohort end to
-   end", the second "how well does the model do the part it had data for".
-
-## File index — load only what the task needs
-
-| File | Contains | Load when you're about to... |
-|---|---|---|
-| `01_header_and_rules.md` | Doc purpose, maintenance rules, repo/status header | Rarely — only if unsure how this doc system works |
-| `02_goal_and_constraints.md` | Project goal, thesis framing, ALL permanent constraints (research/data/compute/communication/tooling) | Almost always worth a skim — these are non-negotiable rules that apply to every task |
-| `03_data_roster.md` | Cohorts, cell counts, pixel sizes, Danenberg status, rejected datasets | Working with data loading, a specific cohort, or dataset questions |
-| `04a_pipeline_folder_layout_stage0_0b.md` | Folder layout, Stage 0 (audit), Stage 0b (marker identity) | Touching acquisition, marker-name resolution, or repo structure |
-| `04b_pipeline_stage1_and_1b.md` | Stage 1 (value harmonisation) and Stage 1b (label alignment) — the core proven result | Touching normalisation or label alignment; understanding the central experiment |
-| `05_pipeline_planned_stages_2_to_7.md` | Designs for Stage 2 (tokenisation, next up) through Stage 7 | Building Stage 2 onward |
-| `06_rejected_and_investigated.md` | Rejected designs, already-investigated ideas (don't repeat) | Before proposing any new design |
-| `07_gaps_and_open_questions.md` | Known unresolved gaps, open questions | Before trusting Stage 1b outputs downstream |
-| `08_decision_log_and_do_not_repeat.md` | Dated decision log (D-1...), explicit "do not repeat" list | Before proposing anything that sounds like a past idea; when recording a new decision |
-| `09_status_deps_and_commands.md` | Implementation checklist, dependencies, verification commands | Checking what's built, or running verification |
-| `10_claim_risk_and_next_actions.md` | Falsification checklist for the thesis claim, risk register, immediate next actions | Planning what to do next |
-| `11_resume_prompt_and_appendix.md` | The original resume prompt, appendix of explicitly UNKNOWN items | Rarely — historical reference only |
-
-## Update protocol (every session, before ending)
-
-These docs are the single source of truth and must stay current. Follow the
-maintenance rules in `01_header_and_rules.md`: **never delete or silently
-rewrite** — mark old entries `Accepted / Replaced / Deprecated / Rejected`
-and say what replaced them and why.
-
-1. **New decision made?** → append a dated entry to
-   `08_decision_log_and_do_not_repeat.md` (next D-number).
-2. **A stage's status changed (built, gate passed/failed)?** → update
-   `09_status_deps_and_commands.md` (checklist) AND the relevant `04x`/`05`
-   file's status marker (✅/🟡/⚪/❌), plus the one-line status in this
-   `CLAUDE.md` header above.
-3. **A design was tried and rejected?** → add it to
-   `06_rejected_and_investigated.md`, don't just delete it from wherever it was.
-4. **A new gap or open question surfaced?** → add to
-   `07_gaps_and_open_questions.md`.
-5. **Risk status changed?** → update `10_claim_risk_and_next_actions.md`.
-6. Keep edits inside the correct numbered file — do not grow this index file
-   itself beyond an index. If a file grows past ~250 lines, split it further
-   and add the new file to the table above.
-7. Confirm every substantive edit with the user first (standing rule, see
-   `02_goal_and_constraints.md` §2.4) before writing it.
+Each stage produces a gate. Thresholds and expected cases are written **before** the run into `celltype_transfer/declared/gate*_expect.csv` (the file names are kept as registered), and the stage scores itself against that file.
+
+Rules that keep this honest:
+
+- Do not edit a `gate*_expect.csv` threshold to make a run pass. If a rule is replaced, keep the old row marked `REPLACED` and record why.
+- A waived failure stays visible: set `waived=1` and write the evidence in `waiver_reason` (see the stroma row in `gate1b_expect.csv`).
+- Comments in the code record failed attempts on purpose. Do not clean them out.
+
+Stages write their own markdown report to `reports/` by appending lines to a list (`A = L.append`) and dumping it at the end. Follow that pattern when adding output.
+
+## Current state (branch `rebuild-7cohort`)
+
+Authoritative documents, in this order:
+
+1. `dropped_past_works/benchmark_protocol.yaml` (v2, pre-registered) — the protocol.
+2. `dropped_past_works/docs/plan_two_tracks.md` — status table and decision log (D-numbers) up to 2026-09-13.
+3. `README.md` — method and rationale. `dropped_past_works/docs/full view.md` is a longer narrative version.
+
+The results below are from the `pipeline2` runs. Their reports and checkpoints carry the OLD names (`s6_train.md`, `s4_*.pt`, ...) and live in `work_reference/` (a junction to `dropped_past_works/work`; reports unpacked under `work_reference/reports/`). `work/` is the fresh rebuild.
+
+Live decisions from the v2 protocol that change how code should be written:
+
+- **The hand mapping is gone** as a method, a gate, and a validation source. Comparison now happens in **Cell Ontology** space via CellMarker 2.0. Do not reintroduce hand-written label dictionaries.
+- Three label types must never be collapsed: `native` (raw input, never treated as correct), `harmonized` (this project's derived space — a hypothesis, never called "the correct space"), `reference` (external, published).
+- `work/` is the live output directory; `work_reference/` is the previous run, the comparison baseline. `dropped_past_works/` holds `MAPS/`, `_dead/` and the archived code (moved, not deleted).
+- Gate 2 was re-run on the 109-triple vocabulary (2026-09-11, Kaggle T4): PASS, `stage2_arm = absent`. Its checkpoints carry a vocabulary fingerprint and a stale one is refitted, not loaded. `pretrain_masked_markers.py` picks the GPU automatically (`--cpu` forces CPU); on Kaggle use `celltype_transfer/gpu/gpu_session1.ipynb`.
+- **Within-cohort splits are by patient** (plan F3). Always get train/val/test cells through `splits.split_masks(cohort, v.image_id)`, passing the table's `image_id` column unchanged (it already carries the `cohort|` prefix; never add a second one). Every checkpoint records `split_fp`; a mismatch refits (`splits.split_stale`). The slide-split Gate 2 run is archived (`reports/s2_masking_slidesplit.md`, `work/ckpt/_slide_split_2026-09-11/`). Gate 2 was re-run on the patient split (2026-09-11, Kaggle): PASS, Arm B ships again; its 24 + 2 LOTO checkpoints are in `work/ckpt/` and every LOCO/LOTO fold has a leak-free warm start.
+- **LOCO/LOTO folds use fold-local label spaces** (plan F4). Build them with `python celltype_transfer/build_fold_label_spaces.py --folds` (→ `work/spaces/`, rules `declared/gate1b_fold_v2_expect.csv`); the encoder, classifier and spatial stages load a fold's space through `train_adversarial_encoder.space_for(held, mode)` — `--space fold` is the default, `--space shipped` is only the comparison row. The whole-roster `work/label_map.csv` was built with every held-out cohort present and must never be a LOCO headline. Three LOCO folds (CRC, Keren, UPMC) use a post-hoc nearest-feasible cut; carry that flag into any number from them.
+- **Gates 6 and 3 have run on this protocol** (2026-09-12, Kaggle T4, `kaggle/stage36.ipynb`). Gate 6: **FAIL by 0.0008** on check 4, headline LOCO macro-F1 **0.3151**; not waived. Gate 3: PASS, ships **lambda 0.01**, which overturns D-36 on this roster — Stage 6 trained without an adversary, so that gap is an open decision, not a settled one. Reports: `reports/s6_train.md`, `reports/s3_encoder.md`.
+- **Gate 4 has run and PASSED** (2026-09-13, Kaggle T4, `kaggle/stage4.ipynb`, 315.6 min, 30 fits;
+  report `reports/s4_spatial.md`, checkpoints `work/ckpt/s4_*.pt`). Headline LOCO macro-F1: `cell`
+  0.2956, `neigh` 0.3063, `shuffle` 0.2932, `ctx` 0.3164. Checks 1/2/2b/5/6/7/8 all PASS: `neigh`
+  beats `cell` (+0.0107) and beats the same-image `shuffle` control (+0.0130), and `shuffle` falls
+  back toward `cell` as the leakage control requires. **Check 3's paired 95% CI on (neigh − cell)
+  spans zero** ([-0.0239, +0.0453], exact sign-flip p = 0.547, n = 7) — per `gate4_expect.csv` that
+  means the sentence "spatial context improves transfer" is NOT earned, whatever the PASS or the
+  mean says. This is an open question, not a settled win. The optional 4th-loss arm `ctx` beats
+  `neigh` (+0.0101, check 4, not required) and **ships**. UPMC's assumed `px_um` was rescaled ×1.3
+  and ×0.77 and check 1's verdict did not move (check 5 PASS), so the distance features are not an
+  artifact of the unpublished scale.
+  **`nbr_same` (the homotypic fraction) must never become a feature** — it is built from the
+  neighbours' native labels, which on the held-out cohort are the thing being predicted.
+  Three design decisions in `train_spatial_context.py` that must not be quietly reverted:
+  (a) the neighbourhood enters as a **residual on `z_cell` through a zero-initialised gate**, so
+  arm `neigh` starts bit-identical to arm `cell` and must earn its margin — concatenation would
+  widen the prototype space and break Stage 6's prototype initialisation;
+  (b) the pooled mean is **not** the only neighbour feature. `het` (neighbour disagreement) and
+  `d_self` (cell vs neighbourhood average, a boundary detector) exist because a mean over 15
+  neighbours can express neither "is a vessel touching me" (max) nor "am I at a boundary"
+  (variance) — without them a FAILED gate could not be distinguished from pooling that destroyed
+  the signal. `d_self` is computed **after** the shuffle, or the control would not destroy it;
+  (c) attention over neighbours is deliberately **not** used yet: 2–3× compute, and a failure
+  would be unattributable (idea or architecture). Gate 4 passed, so attention is now the
+  candidate next experiment — but check 3's interval spans zero, so that decision should weigh
+  the n=7 caveat above, not just the PASS.
+- **Stage 2 warm starts are fold-local.** Always get Stage 2 weights through `pretrain_masked_markers.warm_for(train_cohorts)`, never by loading `pretrain_armB.pt` directly: it returns only a checkpoint whose recorded training cohorts are a subset of the fit's, and raises when none exists. Loading `pretrain_armB.pt` for a LOCO fold leaks the held-out cohort (it was trained on all 7). `--no-warm` is the only deliberate cold start.
+- **Fresh re-run COMPLETE (2026-09-18/19), `reports/fresh_run_summary.md`.** Every stage re-ran from `Datasets/` through `celltype_transfer/` and reproduced the old run EXACTLY: CPU artifacts byte-identical, 82/82 shared GPU fits bit-identical weights, all 30 Gate 4 and 21 MAPS fits identical scores. New: Gate 6 check 3b `proto2adv` 0.2964 (−0.0187, adversary not shipped); check 6-v2 confidence on−off +0.0001 (CI ±0.034, no effect); `ctx` vs `proto2` +0.0013 (CI [−0.043, +0.045], a tie). Gate 4's `cell` arm has the same weights as Gate 6 `proto3`. The 7-cohort Gate 1 bake-off picks `V2b` on mean R² but the protocol fixes `V3`; not acted on. Run steps with `run.py`: markers `--offline` (the API cache is an input), label space `--expect gate1b_v4_expect.csv`, confidence AFTER vocabulary. Open: Phase 5 candidate 1 (spatial on the 2-loss config), declared first.
+- **Route C (learned prototypes) was tried and dropped, 2026-09-13 — negative result, code removed.** Full account in `docs/plan_two_tracks.md`'s Corrections section. One-line lesson: it correctly kept different native labels apart but never merged any of Gate 1b's declared "same" cross-cohort cases (0 of 7), because no loss term in that design ever compared cells from two different cohorts — removing batch identity (the adversary) is not the same as positively pulling matching biology together across cohorts, and cross-cohort merging does not emerge for free just because batch signal is erased. **Any future method aimed at recognizing that two cohorts' differently-named labels are the same cell type needs an explicit cross-cohort comparison term, or it will fail the same way regardless of architecture.**
+
+## Writing about results
+
+When reporting a run, use: **Result** (what happened) → **Meaning** (what it implies) → **Reason** (why) → **Next** (what to check). State limitations plainly instead of smoothing them over — much of this project's value is in the negative results staying visible.

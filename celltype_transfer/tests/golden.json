@@ -1,0 +1,205 @@
+{
+ "artifacts": {
+  "fold_spaces": {
+   "CRC": "47e46b309656708a",
+   "Danenberg": "fe5f49fa96c0781a",
+   "Keren": "aacf54d744201a40",
+   "Phillips": "377732058a0723aa",
+   "Sorin": "3afd9d2ae1bde156",
+   "UPMC": "ca173b821f76c27c",
+   "ferguson": "bbdb32377f40c3f2"
+  },
+  "n_excluded": 14,
+  "n_vocab": 109,
+  "panel_fp": "109:66147d20",
+  "split_fp": "patient-v1:015916c8",
+  "split_masks": {
+   "CRC": "eb55d491bc9714f1",
+   "Danenberg": "484be35e983b3c83",
+   "Keren": "bdbb09ab6f7c2cbe",
+   "Phillips": "67648eec01cd19c3",
+   "Sorin": "3ca28eccbab2514b",
+   "UPMC": "9530c06a21f0277a",
+   "ferguson": "40767a43bde768ea"
+  },
+  "train": [
+   "CRC",
+   "UPMC",
+   "Keren",
+   "ferguson",
+   "Phillips",
+   "Danenberg",
+   "Sorin"
+  ]
+ },
+ "fits": {
+  "s10_shared": {
+   "f1_all": 0.238142,
+   "f1_core": 0.317522,
+   "f1_majority": 0.022022,
+   "f1_random": 0.053733,
+   "state": "fb6ba1cac639463b"
+  },
+  "s2_armb": {
+   "r2": "fd22c528bfdc5a85",
+   "state": "31465d92a089d5af"
+  },
+  "s3_lam0.0": {
+   "cohort_acc": 0.166667,
+   "cotrained_bits": 0.035304,
+   "f1_all": 0.016517,
+   "f1_core": 0.022022,
+   "f1_majority": 0.011256,
+   "f1_random": 0.053733,
+   "fresh_bits": 0.569731,
+   "state": "720425765f3de863"
+  },
+  "s3_lam0.01": {
+   "cohort_acc": 0.166667,
+   "cotrained_bits": 0.035271,
+   "f1_all": 0.016517,
+   "f1_core": 0.022022,
+   "f1_majority": 0.011256,
+   "f1_random": 0.053733,
+   "fresh_bits": 0.567106,
+   "state": "e02e848fdd12f98d"
+  },
+  "s4_cell": {
+   "derangement": 1.0,
+   "f1_all": 0.02055,
+   "f1_core": 0.0274,
+   "f1_majority": 0.022022,
+   "f1_random": 0.053733,
+   "state": "8dc129e18589015c"
+  },
+  "s4_ctx": {
+   "derangement": 1.0,
+   "f1_all": 0.053308,
+   "f1_core": 0.043011,
+   "f1_majority": 0.022022,
+   "f1_random": 0.053733,
+   "state": "e3b4ea14e9b17bee"
+  },
+  "s4_neigh": {
+   "derangement": 1.0,
+   "f1_all": 0.057867,
+   "f1_core": 0.049378,
+   "f1_majority": 0.022022,
+   "f1_random": 0.053733,
+   "state": "1a8a14473f974103"
+  },
+  "s4_px1.3_neigh": {
+   "derangement": 1.0,
+   "f1_all": 0.05655,
+   "f1_core": 0.047622,
+   "f1_majority": 0.022022,
+   "f1_random": 0.053733,
+   "state": "f6db477ccf9db7a8"
+  },
+  "s4_shuffle": {
+   "derangement": 0.9114,
+   "f1_all": 0.036342,
+   "f1_core": 0.022989,
+   "f1_majority": 0.022022,
+   "f1_random": 0.053733,
+   "state": "87cb6849453ca8fd"
+  },
+  "s6_linear": {
+   "f1_all": 0.016517,
+   "f1_core": 0.022022,
+   "f1_majority": 0.022022,
+   "f1_random": 0.053733,
+   "state": "993ffbc910ab4821"
+  },
+  "s6_noconf": {
+   "f1_all": 0.02,
+   "f1_core": 0.026667,
+   "f1_majority": 0.022022,
+   "f1_random": 0.053733,
+   "state": "3923cebde5226f9e"
+  },
+  "s6_proto2": {
+   "f1_all": 0.02055,
+   "f1_core": 0.0274,
+   "f1_majority": 0.022022,
+   "f1_random": 0.053733,
+   "state": "9b3f3f07f483071f"
+  },
+  "s6_proto2adv": {
+   "f1_all": 0.02055,
+   "f1_core": 0.0274,
+   "f1_majority": 0.022022,
+   "f1_random": 0.053733,
+   "state": "3b18b314a80208c7"
+  },
+  "s6_proto3": {
+   "f1_all": 0.02055,
+   "f1_core": 0.0274,
+   "f1_majority": 0.022022,
+   "f1_random": 0.053733,
+   "state": "8dc129e18589015c"
+  }
+ },
+ "rescore": {
+  "s3_lam0.01_CRC": {
+   "got": 0.327,
+   "stored": 0.327
+  },
+  "s3_lam0.01_Danenberg": {
+   "got": 0.046082,
+   "stored": 0.046082
+  },
+  "s3_lam0.01_Keren": {
+   "got": 0.326027,
+   "stored": 0.326027
+  },
+  "s3_lam0.01_Phillips": {
+   "got": 0.377111,
+   "stored": 0.377111
+  },
+  "s3_lam0.01_Sorin": {
+   "got": 0.406311,
+   "stored": 0.406311
+  },
+  "s3_lam0.01_UPMC": {
+   "got": 0.412787,
+   "stored": 0.412787
+  },
+  "s3_lam0.01_ferguson": {
+   "got": 0.287867,
+   "stored": 0.287867
+  },
+  "s6_proto2_CRC": {
+   "got": 0.304237,
+   "stored": 0.304237
+  },
+  "s6_proto2_Danenberg": {
+   "got": 0.051264,
+   "stored": 0.051264
+  },
+  "s6_proto2_Keren": {
+   "got": 0.282973,
+   "stored": 0.282973
+  },
+  "s6_proto2_Phillips": {
+   "got": 0.345544,
+   "stored": 0.345544
+  },
+  "s6_proto2_Sorin": {
+   "got": 0.414667,
+   "stored": 0.414667
+  },
+  "s6_proto2_UPMC": {
+   "got": 0.41275,
+   "stored": 0.41275
+  },
+  "s6_proto2_ferguson": {
+   "got": 0.39415,
+   "stored": 0.39415
+  }
+ },
+ "rescore_mean": {
+  "s3_lam001": 0.311884,
+  "s6_proto2": 0.315084
+ }
+}

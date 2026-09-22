@@ -1,38 +1,61 @@
+# Cross-Cohort Cell-Type Annotation for Spatial Proteomics
 
-# Cross-Cohort Spatial Proteomics Cell-Type Annotation
+Can a model label cell types in a dataset it has never seen, when that dataset uses a different machine, antibody panel, tissue and label names?
 
-## 1. Research question
+## Data
 
-The project tests whether a model can learn cell-type representations that remain biologically meaningful when the data change across:
+7 public cancer cohorts, about 6 million cells:
 
-- cohort and patient population;
-- tissue and disease;
-- acquisition platform;
-- antibody panel and missing markers;
-- raw-value scale and preprocessing;
-- native label names and label granularity.
+| Cohort | Platform | Tissue |
+|---|---|---|
+| CRC | CODEX | colorectal |
+| UPMC | CODEX | head and neck |
+| Phillips | CODEX | skin |
+| Keren | MIBI-TOF | breast |
+| Danenberg | IMC | breast |
+| Sorin | IMC | lung |
+| Ferguson | IMC | skin |
 
-The strongest test is not random cell-level cross-validation. Cells from the same slide are technically related, so a random split can make the task look easier than it is. The main evaluation is therefore leave-one-cohort-out (LOCO): one complete cohort is hidden, the model is trained on the remaining cohorts, and the hidden cohort is scored only after training and model-selection decisions are complete.
+Raw data is not included. See `celltype_transfer/data_acquisition/` to download it.
 
-## 13. How to run
+## Method in short
 
-The code is in `celltype_transfer/`. `python celltype_transfer/run.py` lists every step in order; `python celltype_transfer/run.py cpu` runs the local steps 1–8. Steps 9–12 need a GPU and run on Kaggle (`celltype_transfer/gpu/README.md`).
+1. **Match markers** by molecule (gene, epitope, modification), not by name.
+2. **Put values on one scale** with a per-cohort rank transform.
+3. **Build a shared label space** by grouping labels with similar marker profiles. It uses no text and no hand-made mapping.
+4. **Encode each cell as a set of marker tokens.** A marker a cohort never measured gets an "absent" token, not a zero.
+5. **Pretrain** by hiding markers and predicting them, then **train a prototype classifier**.
 
-| # | Step (file) | What it does | Gate |
-|---|---|---|---|
-| 1 | `load_cohorts.py --build` | reads each dataset into one standard table (`work/raw/`) | 0 |
-| 2 | `resolve_markers.py --offline` | resolves marker names to (gene, epitope, modification) triples | 0b |
-| 3 | `harmonise_values.py` (`--bakeoff`) | per-cohort rank values, 40,000-cell sample | 1 |
-| 4 | `build_label_space.py --expect gate1b_v4_expect.csv` | the shared label space, from marker signatures | 1b |
-| 5 | `build_marker_vocabulary.py` | the frozen 109-triple vocabulary and the wide value tables | – |
-| 6 | `build_label_confidence.py` | per-cell label confidence (only UPMC has a real one); needs step 5 | – |
-| 7 | `build_fold_label_spaces.py --folds` | one label space per fold, built without the held-out cohort | 1b-fold |
-| 8 | `build_neighbour_graph.py` | 15 nearest neighbours per cell, from the full raw tables | 4 (checks 6–7) |
-| 9 | `pretrain_masked_markers.py --check`, `--loto` | masked-marker pretraining; fold-local warm starts | 2 |
-| 10 | `train_prototype_classifier.py --ablate-losses` | the headline LOCO classifier and its loss ablation | 6 |
-| 11 | `train_adversarial_encoder.py --lambda-sweep` | the slide adversary, λ sweep | 3 |
-| 12 | `train_spatial_context.py --gate` | does the spatial neighbourhood help? | 4 |
-| 13 | `compare_external_baseline.py --gate` | the published MAPS method on the same folds | 10 |
-| 14 | `compare_labels_to_clusters.py` | native labels vs unsupervised clusters | – |
+## How it is tested
 
+Leave-one-cohort-out: hide one cohort, train on the other six, score the hidden one. Repeat for all 7.
 
+## Main result
+
+- Macro-F1 on unseen cohorts: **0.315**, compared with 0.059 for random guessing and 0.007 for always picking the most common class.
+- Filling unmeasured markers with zeros destroys transfer (0.017).
+- A published baseline (MAPS) scores 0.332. With only 7 cohorts, the two are a statistical tie.
+- Spatial context and a batch adversary did not give a measurable gain.
+
+Full details: [thesis_report/methodology.md](thesis_report/methodology.md) and [thesis_report/results.md](thesis_report/results.md).
+
+## How to run
+
+Python 3.12 with torch, pandas, numpy, scipy, scikit-learn, networkx and matplotlib. Run from the repo root:
+
+```bash
+python celltype_transfer/run.py        # list every step and its command
+python celltype_transfer/run.py cpu    # run the CPU steps (1-8)
+```
+
+Training steps (9-13) need a GPU. See `celltype_transfer/gpu/README.md`.
+
+## Repo layout
+
+| Folder | What is in it |
+|---|---|
+| `celltype_transfer/` | the pipeline code |
+| `celltype_transfer/declared/` | pass/fail rules, written before each run |
+| `celltype_transfer/tests/` | reproducibility test (`golden.py --check`) |
+| `diagnostics/` | extra analyses run after the main results |
+| `thesis_report/` | methodology and results chapters |

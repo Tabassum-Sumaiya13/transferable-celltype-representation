@@ -1,0 +1,6 @@
+pair,marker_a,marker_b,lineage_a,lineage_b,cohorts_testable,reason
+t_vs_epithelial,COMPLEX:CD3|pan|none,FAMILY:KRT_PAN|pan|none,T cell,epithelial,7,"T lymphocytes do not express keratin; epithelial cells do not express CD3. Both markers measured in all 7 cohorts."
+b_vs_epithelial,HGNC:7315|pan|none,FAMILY:KRT_PAN|pan|none,B cell,epithelial,7,"B lymphocytes (CD20/MS4A1) do not express keratin. Both markers measured in all 7 cohorts."
+b_vs_t,HGNC:7315|pan|none,COMPLEX:CD3|pan|none,B cell,T cell,7,"B and T lymphocytes are separate lineages; CD20 and CD3 are their textbook exclusive markers. Both measured in all 7 cohorts."
+endothelial_vs_epithelial,HGNC:8823|pan|none,FAMILY:KRT_PAN|pan|none,endothelial,epithelial,7,"endothelial cells (CD31/PECAM1) are keratin-negative; epithelium is CD31-negative. CD31 is also on some immune cells, which does not matter here because the pair only tests CD31-high against keratin-high."
+immune_vs_epithelial,HGNC:9666|pan|none,FAMILY:KRT_PAN|pan|none,immune,epithelial,4,"CD45 (PTPRC, pan epitope) marks all leukocytes; epithelium is CD45-negative. Pan-CD45 is measured in CRC, Keren, Phillips and UPMC only - Danenberg, ferguson and Sorin cannot be classified on this pair."

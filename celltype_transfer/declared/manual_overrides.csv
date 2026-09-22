@@ -1,0 +1,20 @@
+raw_or_core,gene,hgnc_id,note
+aSMA,ACTA2,HGNC:130,alpha smooth muscle actin - informal antibody name; HGNC returns 0 hits for aSMA
+GranzymeB,GZMB,HGNC:4709,spelled out rather than the gene symbol
+granzB,GZMB,HGNC:4709,ferguson's abbreviation of the same antibody
+PD1,PDCD1,HGNC:8760,"HGNC alias_symbol/PD1 returns 3 candidates (SNCA, PDCD1, SPATA2); the hyphenated PD-1 resolves cleanly, the unhyphenated does not"
+NFKBp65,RELA,HGNC:9955,p65 is the RELA subunit of NF-kB
+Mastcell-tryptase,TPSAB1,HGNC:12019,mast cell tryptase alpha/beta 1
+Keratin17,KRT17,HGNC:6427,spelled out rather than the gene symbol
+Keratin6,KRT6A,HGNC:6443,spelled out; the Keren panel's keratin 6 antibody targets KRT6A
+B-catenin,CTNNB1,HGNC:2514,beta-catenin written with a bare B
+Synaptophysin,SYP,HGNC:11506,UniProt ties SYP with the paralogue SYPL1 so the automatic answer is refused
+p16,CDKN2A,HGNC:1787,"p16INK4a is the CDKN2A product; UniProt ties it with an unrelated ARPC5 hit"
+FX111A,F13A1,HGNC:3531,"reads as FXIIIA - coagulation factor XIII A subunit - with the Roman numerals typed as ones"
+CLA-CD162,SELPLG,HGNC:10722,CD162 is PSGL-1 / SELPLG; CLA is the carbohydrate epitope it carries
+Mastcell tryptase,TPSAB1,HGNC:12019,spacing variant of the same antibody name
+SMA,ACTA2,HGNC:130,"D-55 repair: bare SMA resolved to SMN1 (spinal muscular atrophy) via an HGNC PREVIOUS symbol - not smooth muscle actin. Hits Keren AND Danenberg. Same failure family as Na -> XK: an unambiguous single hit, so the review queue never fired"
+FSP1,S100A4,HGNC:10494,"D-55 repair: FSP1 resolved to AIFM2 (UniProt:Q9BRQ8). FSP1 is fibroblast-specific protein 1, which is S100A4 - one of the fibroblast-specific markers files/02 2.2 says the roster lacks"
+CD31-vWF,PECAM1,HGNC:8823,"D-55 repair: resolved to VWF alone. Co-stain of two endothelial markers; sent to PECAM1 so Danenberg joins the six cohorts already on HGNC:8823. files/03 3.3 predicted a COMPLEX - rejected because a COMPLEX: triple would not merge with them and Danenberg would stay isolated"
+CK5,KRT5,HGNC:6442,"Danenberg Pr141. markerStackOrder names the channel CK5; AbPanel names the target 'Cytokeratin 5' clone EP1601Y - a single-gene keratin 5 antibody, so it resolves cleanly"
+ER,ESR1,HGNC:3467,"Danenberg Ho165. AbPanel lists 'Rabbit IgG (H+L)' here - the anti-rabbit SECONDARY reagent, not the target. Three lines of evidence say the channel is oestrogen receptor: six published phenotypes are defined by ER level (CK^{med}ER^{lo} etc, 319841 cells / 28% of the cohort); function_order 5 groups it with the breast tumour markers panCK 2 CK8-18 3 CK5 4 ER 5 HER2 6-7; and AbPanel is demonstrably loose elsewhere - it calls the CD45RO channel plain 'CD45' despite clone 2B11"
